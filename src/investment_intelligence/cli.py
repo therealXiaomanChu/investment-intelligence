@@ -5,7 +5,8 @@ import os
 import sys
 import time
 
-from .configuration import Settings
+from .configuration import Settings, read_environment
+from .delivery import send_test_email
 from .demo import run_demo
 from .models import encode
 from .pipeline import Pipeline, health_text
@@ -32,6 +33,7 @@ def parser():
     subs.add_parser("dispatch", help="Run due local slots and registered events once")
     subs.add_parser("serve", help="Dispatch every minute")
     subs.add_parser("doctor", help="Show persisted source and delivery health")
+    subs.add_parser("test-email", help="Send one test message using this deployment's mail settings")
     q = subs.add_parser("search", help="Full-text search event titles and factual summaries")
     q.add_argument("query")
     q.add_argument("--limit", type=int, default=20)
@@ -45,6 +47,8 @@ def parser():
 def run(args):
     if args.command == "demo":
         return run_demo(args.output)
+    if args.command == "test-email":
+        return send_test_email(read_environment())
     settings = Settings()
     db = Database(settings.url, preview=getattr(args, "dry_run", False))
     try:

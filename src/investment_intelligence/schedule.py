@@ -38,8 +38,11 @@ def eligible(now, zone):
     start = datetime.combine(day, time(), zone)
     minutes = local.hour * 60 + local.minute
     slots = {}
-    for job, interval in (("news_scan", 120), ("crypto_scan", 240)):
-        slots[job] = utc(start + timedelta(minutes=minutes // interval * interval))
+    # Round in UTC so both occurrences of the repeated hour in autumn stay distinct.
+    instant = now.astimezone(ZoneInfo("UTC"))
+    feed_slot = utc(instant.replace(minute=instant.minute // 15 * 15, second=0, microsecond=0))
+    for job in ("news_scan", "crypto_scan"):
+        slots[job] = feed_slot
     for job, minute in (("calendar_sync", 450), ("source_health", 365)):
         if minutes >= minute:
             slots[job] = utc(start + timedelta(minutes=minute))

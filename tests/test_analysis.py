@@ -148,6 +148,63 @@ def test_budget_resume_on_new_day_after_factual_ingestion(setup):
     assert (charged["input_tokens"], charged["output_tokens"], charged["state"]) == (130, 40, "reconciled")
 
 
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://api.anthropic.com/v1",
+        "https://api.deepseek.com",
+        "https://api.x.ai/v1",
+        "http://127.0.0.1:8000/v1",
+    ],
+)
+def test_direct_provider_requests_and_billing(setup, monkeypatch, base):
+    db, settings = setup
+    settings.env["LLM_BASE_URL"] = base
+    add(db, "notice")
+
+    def post(url, *, headers, json, timeout, allow_redirects):
+        assert allow_redirects is False
+        assert json["model"] == CONFIG["LLM_MODEL"] and json["max_tokens"] == 330
+        if "anthropic" in base:
+            assert url == base + "/messages"
+            assert headers == {"x-api-key": CONFIG["LLM_API_KEY"], "anthropic-version": "2023-06-01"}
+            assert json["messages"][0]["role"] == "user" and "system" in json
+            assert "response_format" not in json
+            messages = [{"role": "system", "content": json["system"]}, *json["messages"]]
+            message = Sender()({}, {"messages": messages})["choices"][0]["message"]
+            data = {
+                "content": [
+                    {"type": "thinking", "thinking": "ignored"},
+                    {"type": "text", "text": message["content"]},
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 10,
+                    "output_tokens": 40,
+                },
+            }
+        else:
+            assert url == base + "/chat/completions"
+            assert headers == {"Authorization": "Bearer " + CONFIG["LLM_API_KEY"]}
+            assert json["response_format"] == {"type": "json_object"}
+            assert json.get("thinking") == ({"type": "disabled"} if "deepseek" in base else None)
+            data = Sender()({}, json)
+
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return data
+
+        return Response()
+
+    monkeypatch.setattr("investment_intelligence.analysis.requests.post", post)
+    assert analyze(db, settings, NOW, "news_scan") == 1
+    assert db.all("SELECT state FROM signals") == [{"state": "analyzed"}]
+    assert db.all("SELECT charged FROM spend") == [{"charged": 210}]
+
+
 def test_untrusted_fields_and_bounded_prompt_news_batch_and_asset_binding(setup):
     db, settings = setup
     settings.env.update(
@@ -260,3 +317,36 @@ def test_historical_budget_backlog_limits_deep_reads_to_top_five(setup):
         "synthetic ablation" in json.loads(p["messages"][1]["content"])[0]["abstract_excerpt"]
         for p in sender.calls
     )
+
+
+def test_checkpoint_failure_restores_paid_call_budget_and_exact_retry_queue(setup, monkeypatch):
+    from investment_intelligence import cloud_state
+
+    db, settings = setup
+    add(db, "old-attempt")
+    add(db, "first-attempt")
+    with db.write() as conn:
+        execute(
+            conn,
+            """INSERT INTO analysis_queue(event_key,asset_id,version,attempts,retry_at)
+                SELECT event_key,asset_id,version,3,:retry FROM signals WHERE event_key='old-attempt'""",
+            retry=utc(NOW - timedelta(minutes=10)),
+        )
+    before = db.all("SELECT * FROM analysis_queue")
+    assert len(before) == 1
+
+    def fail_checkpoint(*args):
+        assert len(db.all("SELECT * FROM spend")) == 1
+        assert len(db.all("SELECT * FROM analysis_queue")) == 2
+        raise RuntimeError("checkpoint failed")
+
+    sender = Sender()
+    with monkeypatch.context() as patch:
+        patch.setattr(cloud_state, "before_external", fail_checkpoint)
+        with pytest.raises(RuntimeError, match="checkpoint failed"):
+            analyze(db, settings, NOW, "news_scan", sender)
+    assert sender.calls == []
+    assert db.all("SELECT * FROM spend") == []
+    assert db.all("SELECT * FROM analysis_queue") == before
+    assert analyze(db, settings, NOW, "news_scan", sender) == 1
+    assert len(sender.calls) == 1

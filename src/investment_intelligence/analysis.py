@@ -87,16 +87,48 @@ def post_chat(env, payload):
         parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"}
     ):
         raise ValueError("LLM_BASE_URL requires HTTPS or loopback HTTP")
+    headers = {"Authorization": "Bearer " + env["LLM_API_KEY"]}
+    endpoint = url + "/chat/completions"
+    native_claude = parts.hostname == "api.anthropic.com"
+    if native_claude:
+        endpoint = url + "/messages"
+        headers = {"x-api-key": env["LLM_API_KEY"], "anthropic-version": "2023-06-01"}
+        system, user = payload["messages"]
+        payload = {
+            "model": payload["model"],
+            "max_tokens": payload["max_tokens"],
+            "system": system["content"] + "\nReturn only the JSON object, without Markdown fences.",
+            "messages": [user],
+        }
+    elif parts.hostname == "api.deepseek.com":
+        # Reserve the bounded output allowance for the evidence summary.
+        payload = {**payload, "thinking": {"type": "disabled"}}
     response = requests.post(
-        url + "/chat/completions",
-        headers={"Authorization": "Bearer " + env["LLM_API_KEY"]},
+        endpoint,
+        headers=headers,
         json=payload,
         timeout=(5, 50),
         allow_redirects=False,
     )
     if not 200 <= response.status_code < 300:
         raise requests.HTTPError(f"Model endpoint HTTP {response.status_code}")
-    return response.json()
+    data = response.json()
+    if native_claude:
+        usage = data.get("usage") or {}
+        inputs = [
+            usage.get("input_tokens"),
+            usage.get("cache_creation_input_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+        ]
+        content = "".join(part["text"] for part in data["content"] if part["type"] == "text")
+        return {
+            "choices": [{"message": {"content": content}}],
+            "usage": {
+                "prompt_tokens": sum(inputs) if all(type(n) is int and n >= 0 for n in inputs) else None,
+                "completion_tokens": usage.get("output_tokens"),
+            },
+        }
+    return data
 
 
 def candidates(db, settings, now, weekly):
@@ -116,7 +148,8 @@ def candidates(db, settings, now, weekly):
             selected.add(paper["event_key"])
     pending = db.all(
         """SELECT s.*, e.module,e.title,d.content_hash,d.payload,
-        COALESCE(q.attempts,0) AS attempts FROM signals s JOIN events e ON e.event_key=s.event_key
+        COALESCE(q.attempts,0) AS attempts, q.retry_at AS prior_retry_at
+        FROM signals s JOIN events e ON e.event_key=s.event_key
         JOIN documents d ON e.current_document=d.document_id
         LEFT JOIN analysis_queue q ON q.event_key=s.event_key AND q.asset_id=s.asset_id AND q.version=s.version
         WHERE (s.state='analysis_pending' OR (e.module='research' AND s.state='factual'))
@@ -277,6 +310,30 @@ def analyze(db, settings, now, job, sender=post_chat):
         call = reserve(db, env, now.astimezone(settings.tz), model, job, estimate, batch)
         if call is None:
             continue
+        from .cloud_state import before_external
+
+        try:
+            before_external(db, env)
+        except BaseException:
+            # No request reached the provider. Restore the queue and budget together.
+            with db.write() as conn:
+                execute(conn, "DELETE FROM spend WHERE call_id=:call AND state='reserved'", call=call)
+                for row, _, _ in batch:
+                    condition = "WHERE event_key=:k AND asset_id=:a AND version=:v AND attempts=:expected"
+                    params = dict(
+                        k=row["event_key"], a=row["asset_id"], v=row["version"], expected=row["attempts"] + 1
+                    )
+                    if row["prior_retry_at"] is None:
+                        execute(conn, "DELETE FROM analysis_queue " + condition, **params)
+                    else:
+                        execute(
+                            conn,
+                            "UPDATE analysis_queue SET attempts=:old, retry_at=:stamp " + condition,
+                            old=row["attempts"],
+                            stamp=row["prior_retry_at"],
+                            **params,
+                        )
+            raise
         calls += 1
         try:
             response = sender(

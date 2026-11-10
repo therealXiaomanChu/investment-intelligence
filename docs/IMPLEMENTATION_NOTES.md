@@ -2,14 +2,14 @@
 
 | Specification overlap | Implemented behavior |
 |---|---|
-| Daily fetches in the technical plan, higher-frequency polling in the decisions | SEC runs on weekdays every 15 minutes from 06:00 through 22:00 New York time. News runs every two hours, and crypto every four hours, including weekends. |
-| Cloud PostgreSQL and local deployment | Both engines use the same observation, event, fact, signal and report logic. SQLite uses FTS5 and PostgreSQL uses a GIN text-search index. The Actions runner requires an external PostgreSQL database. |
+| Polling cadence | SEC runs on weekdays every 15 minutes from 06:00 through 22:00 New York time. News and crypto run in 15-minute slots, including weekends. |
+| Cloud and local storage | Both engines use the same observation, event, fact, signal and report logic. SQLite uses FTS5 and PostgreSQL uses a GIN text-search index. Actions restores a SQLite snapshot from its state branch or connects to the operator's PostgreSQL database. |
 | Delivery channel defaults | Each snapshot is archived in the database and rendered as Markdown. SMTP delivery uses explicit configuration. A missing model key yields a factual brief. |
 | Paid consensus and direction | Public releases supply facts. Macro observations carry nullable consensus, provider and as-of metadata. The MVP has no licensed consensus provider. Factual signals leave direction and confidence empty. |
 | Named sources and accessible protocols | SEC provides the structured financial slice. NVIDIA IR supplies an automated earnings calendar, and operators can register additional official dates. BTC, ETH and SOL use Bitcoin Core, the Ethereum Foundation and Agave. Optional and unsupported coverage is inventoried in SOURCE_STATUS.md. |
 | Multiple symbols, one issuer | Alphabet shares one CIK across two share classes, with distinct asset IDs. SpaceX has a pinned CIK and listing date. An earlier issuer's SPCX filings cannot match the SpaceX example. |
 | Official clocks and customizable time zones | Store timestamps in UTC, preserve release time semantics at the connector, and use XNYS sessions for US equity briefs. TIMEZONE selects editorial schedule and budget boundaries. SEC and market briefs use New York time. |
-| Event-aware Actions scheduling | A fixed five-minute dispatcher looks up durable slots and due events. On a late run it processes the latest applicable slot, with a catch-up window for weekly research. |
+| Event-aware Actions scheduling | Actions requests a dispatch every 15 minutes to look up durable slots and due events. On a late run it processes the latest applicable slot, with a catch-up window for weekly research. |
 | Source text and cost | Parsers and Decimal arithmetic extract numbers. The model receives bounded untrusted evidence and has no tools. Only schema-validated results with known evidence URLs update signals. |
 
 ## Persistent state

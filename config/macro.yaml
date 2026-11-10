@@ -11,3 +11,6 @@ bls_series:
     - {id: WPSFD4, name: PPI final demand, unit: "index (Nov 2009=100, SA)"}
 calendar_horizon_days: 60
 revision_lookback_days: 90
+# auto uses FRED, then the Federal Reserve H.15 release and Cboe after a transport failure.
+# publishers starts directly with H.15 (latest five business days) and Cboe daily closes.
+market_provider: auto

@@ -15,6 +15,32 @@ from urllib.parse import quote
 from .models import digest, utc
 from .storage import execute
 
+
+def mail_environment(env):
+    """Expand the Gmail shortcut without sharing its password with a custom relay."""
+    env = dict(env)
+    scope = env.get("EMAIL_SCOPE") or "all"
+    if scope not in {"all", "alerts"}:
+        raise ValueError("EMAIL_SCOPE must be all or alerts")
+    env["EMAIL_SCOPE"] = scope
+    address = (env.get("GMAIL_ADDRESS") or "").strip()
+    if not env.get("SMTP_HOST") and address:
+        env.update(
+            SMTP_HOST="smtp.gmail.com",
+            SMTP_PORT="587",
+            SMTP_SECURITY="starttls",
+            SMTP_USER=address,
+            SMTP_PASSWORD=(env.get("GMAIL_APP_PASSWORD") or "").replace(" ", ""),
+            SMTP_FROM=address,
+            SMTP_TO=env.get("SMTP_TO") or address,
+        )
+    return env
+
+
+def mail_selected(env, report_id):
+    return env.get("EMAIL_SCOPE") != "alerts" or report_id.startswith("alert-")
+
+
 NAMES = {
     "corporate": "Corporate & institutional",
     "research": "Academic research",
@@ -115,9 +141,8 @@ def snapshot(db, settings, report_id, filename, events, title, now, note="", pro
     existing = db.all("SELECT report_id FROM reports WHERE report_id=:r", r=report_id)
     if not existing or provisional:
         body = render(db, events, title, now, settings, note)
-        state = (
-            "ready" if settings.env.get("SMTP_HOST") and not settings.demo and not provisional else "disabled"
-        )
+        enabled = settings.env.get("SMTP_HOST") and mail_selected(settings.env, report_id)
+        state = "ready" if enabled and not settings.demo and not provisional else "disabled"
         with db.write() as conn:
             execute(
                 conn,
@@ -141,6 +166,8 @@ def snapshot(db, settings, report_id, filename, events, title, now, note="", pro
 
 
 def mail_message(env, row):
+    if env.get("SMTP_USER") and not env.get("SMTP_PASSWORD"):
+        raise ValueError("Set the SMTP password or Gmail app password")
     sender = env["SMTP_FROM"]
     recipients = [addr for _, addr in getaddresses([env["SMTP_TO"]]) if addr]
     if not sender or not recipients:
@@ -173,6 +200,22 @@ def smtp(env, msg):
             raise RuntimeError("One or more recipients refused")
 
 
+def send_test_email(env):
+    if not env.get("SMTP_HOST"):
+        raise ValueError("Configure GMAIL_ADDRESS and GMAIL_APP_PASSWORD, or an SMTP relay")
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    row = {
+        "report_id": "test-email-" + stamp,
+        "body": f"# Investment Intelligence · email test\n\nThe deployment sent this test at {stamp}.",
+    }
+    msg = mail_message(env, row)
+    try:
+        smtp(env, msg)
+    except (OSError, smtplib.SMTPException, RuntimeError) as exc:
+        raise RuntimeError(f"Email test failed: {type(exc).__name__}") from None
+    return "The SMTP relay accepted the test email. Check the configured inbox."
+
+
 def deliver(db, settings, report_id, send=smtp):
     row = db.all("SELECT * FROM reports WHERE report_id=:r", r=report_id)[0]
     directory = settings.output
@@ -190,6 +233,14 @@ def deliver(db, settings, report_id, send=smtp):
         )
     if row["mail_state"] != "ready" or settings.demo:
         return str(target), row["mail_state"]
+    if not mail_selected(settings.env, report_id):
+        with db.write() as conn:
+            execute(
+                conn,
+                "UPDATE reports SET mail_state='disabled' WHERE report_id=:r AND mail_state='ready'",
+                r=report_id,
+            )
+        return str(target), "disabled"
     try:
         msg = mail_message(settings.env, row)
     except (KeyError, TypeError, ValueError) as exc:
@@ -210,6 +261,19 @@ def deliver(db, settings, report_id, send=smtp):
         ).rowcount
     if not changed:
         return str(target), "claimed"
+    from .cloud_state import before_external
+
+    try:
+        before_external(db, settings.env)
+    except BaseException:
+        # SMTP has not been called. An exit checkpoint must keep this report retryable.
+        with db.write() as conn:
+            execute(
+                conn,
+                "UPDATE reports SET mail_state='ready' WHERE report_id=:r AND mail_state='sending'",
+                r=report_id,
+            )
+        raise
     try:
         send(settings.env, msg)
         state, err = "sent", None

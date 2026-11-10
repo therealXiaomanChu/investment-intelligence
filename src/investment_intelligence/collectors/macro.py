@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
+from ..http import SourceError
 from ..models import Fact, Record
 
 NY = ZoneInfo("America/New_York")
@@ -26,6 +27,8 @@ BLS_API = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 BEA = "https://www.bea.gov/news/schedule"
 BEA_RELEASES = "https://www.bea.gov/news/current-releases"
 FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+H15 = "https://www.federalreserve.gov/releases/h15/"
+VIX_HISTORY = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 FED = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "macro"
 MONTHS = {name.lower(): i for i in range(1, 13) for name in [calendar.month_name[i], calendar.month_abbr[i]]}
@@ -131,7 +134,7 @@ def _ics_timestamp(field):
     return datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=NY)
 
 
-def _bls_calendar(ctx, source):
+def _bls_icalendar(ctx, source):
     matched = 0
     for fields in _ics_events(ctx.http.get(source["url"])):
         title = fields["SUMMARY"][0]
@@ -163,6 +166,70 @@ def _bls_calendar(ctx, source):
         )
     if not matched:
         raise ValueError("BLS calendar contained no supported releases with reference months")
+
+
+def _bls_program(ctx, source, group, label, url):
+    raw = ctx.http.get(url)
+    if not raw:
+        raise ValueError("empty BLS program schedule")
+    page = BeautifulSoup(raw, "html.parser")
+    if not any(label.lower() in h.get_text(" ", strip=True).lower() for h in page.select("title,h1,h2")):
+        raise ValueError("unexpected BLS program schedule title")
+    for table in page.find_all("table"):
+        rows = [r for r in table.find_all("tr") if r.find_parent("table") is table]
+        if not rows:
+            continue
+        columns = [c.get_text(" ", strip=True).lower() for c in rows[0].find_all(["td", "th"])]
+        if columns != ["reference month", "release date", "release time"]:
+            continue
+        if len(rows) == 1:
+            raise ValueError("BLS program schedule has no rows")
+        for row in rows[1:]:
+            fields = [" ".join(c.stripped_strings) for c in row.find_all(["td", "th"], recursive=False)]
+            if len(fields) != 3:
+                ctx.warn(f"BLS {group} schedule has an unrecognized row")
+                continue
+            reference, release, clock = fields
+            period = _period(reference)
+            day = re.fullmatch(r"([a-z]+)\.?\s+(\d{1,2}),\s+(20\d\d)", release, re.I)
+            month = MONTHS.get(day[1].lower()[:3], 0) if day else 0
+            try:
+                if not period or not month:
+                    raise ValueError()
+                stamp = datetime.combine(
+                    date(int(day[3]), month, int(day[2])), datetime.strptime(clock, "%I:%M %p").time(), NY
+                )
+            except ValueError:
+                ctx.warn(f"BLS {group} has no usable official date/time for {reference}")
+                continue
+            if _window(ctx, stamp):
+                yield _schedule(
+                    ctx, source, f"bls:{group}:{period}", f"{label} for {reference}", stamp, "bls_actuals",
+                    {"release_group": group, "period": period}, evidence_url=url,
+                )
+        return
+    raise ValueError("BLS program schedule columns unavailable")
+
+
+def _bls_calendar(ctx, source):
+    try:
+        entries = list(_bls_icalendar(ctx, source))
+    except (SourceError, ValueError) as primary:
+        programs = {"cpi": "cpi", "ppi": "ppi", "employment": "empsit"}
+        successes = 0
+        for name, group in BLS_GROUPS.items():
+            url = urljoin(BLS, programs[group] + ".htm")
+            try:
+                entries = list(_bls_program(ctx, source, group, name.title(), url))
+            except (SourceError, ValueError) as exc:
+                ctx.warn(f"BLS {group} program schedule unavailable: {exc}")
+                continue
+            successes += 1
+            yield from entries
+        if not successes:
+            raise ValueError(f"{primary}; all three BLS program schedules unavailable") from primary
+        return
+    yield from entries
 
 
 def _bea_release_key(title):
@@ -484,13 +551,37 @@ def _level_facts(metrics, period, observations, state):
     return facts
 
 
+def _bls_transition(ctx, state, group, latest):
+    """A baseline confirms a period advanced. The API does not supply a release timestamp."""
+    if ctx.backfill:
+        return None
+    checks = state.setdefault("latest_checks", {})
+    prior = checks.get(group)
+    if prior and latest < prior["period"]:
+        return None
+    expected = _previous(ctx.now.astimezone(NY).strftime("%Y-%m"))
+    advance = False
+    if prior and latest == expected and prior["period"] == _previous(latest):
+        age = ctx.now - datetime.fromisoformat(prior["checked_at"])
+        advance = timedelta(0) <= age <= timedelta(days=1)
+    # Daily collection can discover a new period before the alert window. Keep the
+    # prior baseline so the next scheduled probe can confirm and alert on the transition.
+    if not advance or ctx.job == "bls_probe":
+        checks[group] = {"period": latest, "checked_at": _iso(ctx.now)}
+    if not advance or ctx.job != "bls_probe":
+        return None
+    vintage = state.get("snapshots", {}).get(f"bls:{group}:{latest}", {}).get("vintage", _iso(ctx.now))
+    return vintage if datetime.fromisoformat(vintage) >= datetime.fromisoformat(prior["checked_at"]) else None
+
+
 def _bls_actuals(ctx, source):
     targets = _due(ctx, source)
-    daily = getattr(ctx, "job", "") == "calendar_sync"
-    if not targets and not daily:
+    probe = ctx.job == "bls_probe"
+    discover = ctx.job == "calendar_sync" or probe
+    if not targets and not discover:
         return
     groups = ctx.config("macro")["bls_series"]
-    active_groups = set(groups) if daily else {d["metadata"]["release_group"] for d in targets}
+    active_groups = set(groups) if discover else {d["metadata"]["release_group"] for d in targets}
     needed = sorted({spec["id"] for g in active_groups for spec in groups[g]})
     years = [int(d["metadata"]["period"][:4]) for d in targets] + [ctx.now.year]
     query = {"seriesid": needed, "startyear": str(min(years) - 1), "endyear": str(max(years))}
@@ -502,13 +593,21 @@ def _bls_actuals(ctx, source):
     # Bootstrap when the calendar is inaccessible. The level is observable from BLS itself;
     # its reference month is known and its actual publication timestamp is unknown.
     known = {d["event_key"] for d in targets}
-    if daily:
+    state = copy.deepcopy(ctx.cursor)
+    if discover:
         for group, specs in groups.items():
             months = set.intersection(*(set(observations[spec["id"]]) for spec in specs))
             if not months:
                 ctx.warn(f"BLS {group} has no common reference period")
                 continue
             last = max(months)
+            observed = _bls_transition(ctx, state, group, last)
+            if probe:
+                if observed is None:
+                    continue
+                key = f"bls:{group}:{last}"
+                if key not in known:
+                    state.setdefault("observed_updates", {})[key] = observed
             floor = (ctx.now.date().replace(day=1) - timedelta(days=90)).strftime("%Y-%m")
             if last < floor:
                 ctx.warn(f"BLS {group} latest reference period is stale: {last}")
@@ -529,7 +628,6 @@ def _bls_actuals(ctx, source):
                         }
                     )
     targets.sort(key=lambda d: d["metadata"]["period"])
-    state = copy.deepcopy(ctx.cursor)
     state.setdefault("originals", {})
     state.setdefault("snapshots", {})
     for d in targets:
@@ -568,6 +666,10 @@ def _bls_actuals(ctx, source):
         if stamp:
             state.setdefault("release_times", {})[key] = stamp
             event_at = stamp
+        elif observed := state.get("observed_updates", {}).get(key):
+            event_at = observed
+            meta["time_precision"] = "first observed via BLS API; release time unavailable"
+            summary += f" First observed via the BLS API at {observed}; release time unavailable."
         else:
             # The dated event is the end of the underlying survey month, explicitly labeled.
             start = date.fromisoformat(period + "-01")
@@ -619,6 +721,47 @@ def _fred_series(ctx, source, series, start, end):
         yield row["observation_date"], row[series]
 
 
+def _h15_nominal(raw):
+    table = BeautifulSoup(raw, "html.parser").select_one("table#h15table")
+    if table is None:
+        raise ValueError("Federal Reserve H.15 table unavailable")
+    dates = {
+        th["id"]: datetime.strptime(th.get_text(" ", strip=True), "%Y %b %d").date().isoformat()
+        for th in table.select("th.colhead[id]") if re.fullmatch(r"col\d+", th["id"])
+    }
+    labels = {th["id"]: th.get_text(" ", strip=True) for th in table.select("th[id]")}
+    observations = {}
+    for row in table.find_all("tr"):
+        heading = row.find("th")
+        if not heading:
+            continue
+        series = {"2-year": "DGS2", "10-year": "DGS10"}.get(heading.get_text(strip=True))
+        parents = [labels.get(i, "") for i in heading.get("headers", [])]
+        if not series or "Treasury constant maturities" not in parents or not any(
+            re.fullmatch(r"Nominal(?:\s+\d+)?", label) for label in parents
+        ):
+            continue
+        values = []
+        for cell in row.find_all("td"):
+            day = next((dates[i] for i in cell.get("headers", []) if i in dates), None)
+            if not day:
+                raise ValueError("Federal Reserve H.15 observation has no trading date")
+            value = cell.get_text(strip=True)
+            if value.upper() not in {"", "N.A.", "N/A", "ND", "--"}:
+                values.append((day, value))
+        observations[series] = values
+    if not dates or set(observations) != {"DGS2", "DGS10"}:
+        raise ValueError("Federal Reserve H.15 nominal yield columns unavailable")
+    return observations
+
+
+def _vix_closes(raw):
+    reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
+    if reader.fieldnames != ["DATE", "OPEN", "HIGH", "LOW", "CLOSE"]:
+        raise ValueError("Unexpected Cboe VIX history columns")
+    return [(datetime.strptime(row["DATE"], "%m/%d/%Y").date().isoformat(), row["CLOSE"]) for row in reader]
+
+
 def _fred_market(ctx, source):
     specs = {
         "DGS2": ("2-year Treasury yield", "percent", "US2Y"),
@@ -635,9 +778,35 @@ def _fred_market(ctx, source):
     # Requests use a bounded date range and replay the overlap for revised market closes.
     end = min(today, start + timedelta(days=100))
     observations = {}
+    policy = ctx.config("macro").get("market_provider", "auto")
+    if policy not in {"auto", "publishers"}:
+        raise ValueError("market_provider must be auto or publishers")
+    use_fred = policy == "auto"
+    publisher_data = {}
+    urls = {}
     for series in specs:
+        if use_fred:
+            try:
+                values = list(_fred_series(ctx, source, series, start, end))
+                urls[series] = "https://fred.stlouisfed.org/series/" + series
+            except SourceError:
+                # An unavailable FRED endpoint would otherwise consume three retry cycles per series.
+                use_fred = False
+        if not use_fred:
+            url = VIX_HISTORY if series == "VIXCLS" else H15
+            if url not in publisher_data:
+                try:
+                    raw = ctx.http.get(url)
+                    publisher_data[url] = {"VIXCLS": _vix_closes(raw)} if url == VIX_HISTORY else _h15_nominal(raw)
+                except (SourceError, ValueError) as exc:
+                    ctx.warn(f"Official market source {url} unavailable: {exc}")
+                    publisher_data[url] = {}
+            if series not in publisher_data[url]:
+                continue
+            values = publisher_data[url][series]
+            urls[series] = url
         recent = False
-        for observed_on, raw in _fred_series(ctx, source, series, start, end):
+        for observed_on, raw in values:
             day = date.fromisoformat(observed_on)
             if raw in (None, "", ".") or not start <= day <= end:
                 continue
@@ -647,7 +816,9 @@ def _fred_market(ctx, source):
             observations.setdefault(day, {})[series] = str(value)
             recent |= end - day <= timedelta(days=7)
         if not recent:
-            ctx.warn(f"FRED {series} has no observation within 7 days of {end}")
+            ctx.warn(f"{series} has no observation within 7 days of {end}")
+    if not urls:
+        raise ValueError("All official market data sources unavailable: " + " | ".join(ctx.warnings))
     by_symbol = {a["symbol"]: a["id"] for a in ctx.watchlist["assets"]}
     snapshots = copy.deepcopy(ctx.cursor.get("snapshots", {}))
     # Whole dates commit together. A short page is resumed from its last complete date.
@@ -658,18 +829,23 @@ def _fred_market(ctx, source):
             break
         key = "fred:market:" + str(day)
         signature = sorted(values.items())
-        if snapshots.get(str(day)) == dict(signature):
+        previous = snapshots.get(str(day), {})
+        if not previous.keys() <= values.keys() or (
+            previous.keys() == values.keys() and all(Decimal(previous[s]) == Decimal(v) for s, v in signature)
+        ):
+            # Shrinking source coverage must not erase an archived fact. Different display precision
+            # across distributors alone is not a revision.
             through = str(day)
             continue
         facts = []
         assets = []
-        urls = {}
+        evidence = {}
         for series, value in signature:
             name, unit, symbol = specs[series]
             facts.append(Fact(name, value, unit, str(day), _iso(ctx.now)))
             if symbol in by_symbol:
                 assets.append(by_symbol[symbol])
-            urls[series] = "https://fred.stlouisfed.org/series/" + series
+            evidence[series] = urls[series]
         if "DGS2" in values and "DGS10" in values:
             spread = 100 * (Decimal(values["DGS10"]) - Decimal(values["DGS2"]))
             facts.append(
@@ -686,7 +862,7 @@ def _fred_market(ctx, source):
         yield Record(
             source_id=source["id"],
             external_id=key,
-            url=urls[primary],
+            url=evidence[primary],
             module="macro",
             kind="market_observation",
             event_key=key,
@@ -697,7 +873,7 @@ def _fred_market(ctx, source):
             assets=tuple(assets),
             facts=tuple(facts),
             importance=0.45,
-            metadata={"time_precision": "observation date only", "series_urls": urls},
+            metadata={"time_precision": "observation date only", "series_urls": evidence},
         )
         snapshots[str(day)] = dict(signature)
         through = str(day)

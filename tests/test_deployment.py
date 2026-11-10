@@ -13,7 +13,7 @@ from investment_intelligence.schedule import JOBS
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_cloud_requires_external_database():
+def test_cloud_refuses_ephemeral_database():
     with pytest.raises(ValueError, match="PostgreSQL"):
         Settings({"GITHUB_ACTIONS": "true", "DATABASE_URL": "sqlite:///ephemeral.sqlite3"})
     config = Settings({"GITHUB_ACTIONS": "true", "DATABASE_URL": "postgresql://db.example/intel"})
@@ -51,9 +51,14 @@ def test_actions_scope_and_dispatch_commands():
         assert workflow["permissions"] == {"contents": "read"}
         assert "pull_request_target" not in workflow["on"]
     pipeline = yaml.safe_load((path / "pipeline.yml").read_text())
-    assert pipeline["on"]["schedule"] == [{"cron": "*/5 * * * *", "timezone": "America/New_York"}]
+    assert pipeline["on"]["schedule"] == [{"cron": "*/15 * * * *", "timezone": "America/New_York"}]
+    assert pipeline["jobs"]["collect"]["permissions"] == {"contents": "write"}
+    guard = pipeline["jobs"]["collect"]["if"]
+    assert "default_branch" in guard
+    assert "github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'" in guard
+    assert pipeline["concurrency"]["cancel-in-progress"] is False
     choices = pipeline["on"]["workflow_dispatch"]["inputs"]["job"]["options"]
-    assert set(choices) == set(JOBS) | {"dispatch", "doctor"}
+    assert set(choices) == set(JOBS) | {"dispatch", "doctor", "test-email"}
 
 
 def test_compose_persists_and_mounts_readonly_configuration():

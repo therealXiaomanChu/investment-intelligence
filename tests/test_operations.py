@@ -100,7 +100,9 @@ def test_us_market_holidays_and_weekend_crypto_across_time_zones():
     assert "after_close" not in eligible(thanksgiving, NY)
     saturday = datetime(2026, 11, 7, 13, tzinfo=NY)
     slots = eligible(saturday, NY)
-    assert slots["crypto_scan"] == utc(saturday.replace(hour=12))
+    assert slots["crypto_scan"] == slots["news_scan"] == utc(saturday)
+    later = saturday.replace(minute=29)
+    assert eligible(later, NY)["news_scan"] == utc(saturday.replace(minute=15))
     assert "sec_poll" not in slots and "premarket_brief" not in slots
     china = ZoneInfo("Asia/Shanghai")
     # 21:50 Monday ET is Tuesday morning in Shanghai.

@@ -1,15 +1,19 @@
 name: Intelligence pipeline
 "on":
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
       timezone: America/New_York
   workflow_dispatch:
     inputs:
       job:
         description: Run the dispatcher or one job
         type: choice
-        options: [dispatch, calendar_sync, sec_poll, news_scan, crypto_scan, event_check, paper_weekly, premarket_brief, after_close, source_health, doctor]
+        options: [dispatch, calendar_sync, sec_poll, news_scan, crypto_scan, event_check, paper_weekly, premarket_brief, after_close, source_health, doctor, test-email]
         default: dispatch
+      initialize_state:
+        description: Initialize a missing SQLite state branch on first setup
+        type: boolean
+        default: false
       backfill:
         description: Replay the selected collector's backfill window
         type: boolean
@@ -22,12 +26,15 @@ concurrency:
   cancel-in-progress: false
 jobs:
   collect:
+    if: github.ref_name == github.event.repository.default_branch && (github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          persist-credentials: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -49,6 +56,12 @@ jobs:
           JOB: ${{ inputs.job || 'dispatch' }}
           BACKFILL: ${{ inputs.backfill }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          INITIALIZE_STATE: ${{ inputs.initialize_state || false }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SCOPE: ${{ vars.EMAIL_SCOPE || 'alerts' }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
@@ -76,6 +89,19 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           SMTP_TO: ${{ secrets.SMTP_TO }}
         run: |
+          if [[ "$JOB" == "test-email" ]]; then
+            python -m investment_intelligence test-email
+            exit
+          fi
+          umask 077
+          export CLOUD_STATE_DIR="$RUNNER_TEMP/intelligence-state"
+          python -m investment_intelligence.cloud_state restore
+          # Always checkpoint a consistent SQLite backup, including partial progress on failure.
+          # SMTP claims and paid model reservations checkpoint before external effects.
+          trap 'python -m investment_intelligence.cloud_state save || exit 1' EXIT
+          if [[ "$REPOSITORY_PRIVATE" != true && ( -n "$WATCHLIST_FILE" || -n "$LLM_API_KEY" ) ]]; then
+            exec > "$RUNNER_TEMP/private-pipeline.log" 2>&1
+          fi
           case "$JOB" in
             dispatch|doctor) python -m investment_intelligence "$JOB" ;;
             *)
@@ -85,7 +111,7 @@ jobs:
               ;;
           esac
       - name: Archive Markdown briefs
-        if: ${{ !cancelled() && (vars.UPLOAD_REPORTS == 'true' || (env.USES_PRIVATE_WATCHLIST != 'true' && vars.UPLOAD_REPORTS != 'false')) }}
+        if: ${{ !cancelled() && (vars.UPLOAD_REPORTS == 'true' || (github.event.repository.private && env.USES_PRIVATE_WATCHLIST != 'true' && vars.UPLOAD_REPORTS != 'false')) }}
         uses: actions/upload-artifact@v4
         with:
           name: briefs-${{ github.run_id }}-${{ github.run_attempt }}

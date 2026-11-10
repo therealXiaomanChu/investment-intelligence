@@ -8,6 +8,12 @@ from zoneinfo import ZoneInfo
 import yaml
 from dotenv import dotenv_values
 
+from .delivery import mail_environment
+
+
+def read_environment(env=None):
+    return mail_environment(env if env is not None else {**dotenv_values(".env"), **os.environ})
+
 
 def load_config(path):
     with open(path, encoding="utf-8") as handle:
@@ -19,7 +25,7 @@ def load_config(path):
 
 class Settings:
     def __init__(self, env=None, *, demo=False):
-        self.env = dict(env if env is not None else {**dotenv_values(".env"), **os.environ})
+        self.env = read_environment(env)
         default = Path(__file__).resolve().parents[2] / "config"
         if not default.joinpath("sources.yaml").exists():
             default = Path(sys.prefix) / "share/investment-intelligence/config"
@@ -31,7 +37,17 @@ class Settings:
             and self.env.get("GITHUB_ACTIONS") == "true"
             and not self.url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://"))
         ):
-            raise ValueError("GitHub Actions requires an external PostgreSQL DATABASE_URL")
+            state = self.env.get("CLOUD_STATE_DIR")
+            if (
+                self.env.get("DATABASE_URL")
+                or not state
+                or not (Path(state) / "head").is_file()
+                or not (Path(state) / "intelligence.sqlite3").is_file()
+            ):
+                raise ValueError(
+                    "GitHub Actions requires restored SQLite state or an external PostgreSQL DATABASE_URL"
+                )
+            self.url = "sqlite:///" + str((Path(state) / "intelligence.sqlite3").resolve())
         self.tz = ZoneInfo(self.env.get("TIMEZONE", "America/New_York"))
         self.limit = int(self.env.get("FETCH_LIMIT", "100"))
         if not 1 <= self.limit <= 1000:

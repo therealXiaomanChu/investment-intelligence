@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from importlib import import_module
 import json
+from zoneinfo import ZoneInfo
 
 from . import analysis
 from .configuration import Context
@@ -155,7 +156,7 @@ class Pipeline:
                     k=row["event_key"],
                 )
 
-    def run(self, job, now, *, backfill=False, only=None):
+    def run(self, job, now, *, backfill=False, only=None, discover_bls=False):
         if job not in JOBS:
             raise ValueError(f"Unknown job {job}")
         db, settings = self.db, self.settings
@@ -193,6 +194,8 @@ class Pipeline:
                     work_job = source["jobs"][0]
                 else:
                     continue
+            elif job == "event_check" and discover_bls and sid == "bls_actuals" and job in source["jobs"]:
+                work_job = "bls_probe"
             elif job not in source["jobs"] or (job == "event_check" and not relevant):
                 continue
             recover_backfill = job == "source_health"
@@ -214,7 +217,9 @@ class Pipeline:
             arxiv_cursor = json.loads(prior[0]["cursor"]) if prior else {}
             if arxiv_cursor.get("end"):
                 previous_window = utc(arxiv_cursor["end"]) != week_window(now, settings.tz)[1]
-        if not db.preview and not paper_incomplete and job not in {"calendar_sync", "source_health"}:
+        if not db.preview and not paper_incomplete and job not in {"calendar_sync", "source_health"} and not (
+            discover_bls and not due
+        ):
             try:
                 analysis.analyze(db, settings, now, job)
             except (ValueError, KeyError, ArithmeticError) as exc:
@@ -317,13 +322,28 @@ class Pipeline:
             "continuation": paper_incomplete or previous_window,
         }
 
+    def claim_bls_probe(self, now):
+        local = now.astimezone(ZoneInfo("America/New_York"))
+        elapsed = local.hour * 60 + local.minute - (8 * 60 + 35)
+        if local.weekday() >= 5 or not 0 <= elapsed < 90:
+            return False
+        slot = utc(local.replace(second=0, microsecond=0) - timedelta(minutes=elapsed % 15))
+        # A crash must not spend another quota unit on the same optional query.
+        with self.db.write() as conn:
+            result = execute(conn, """INSERT INTO slots(job_name,slot)
+                SELECT 'bls_probe', :slot WHERE EXISTS (SELECT 1 FROM sources
+                WHERE source_id='bls_calendar' AND health IN ('unavailable', 'partial'))
+                ON CONFLICT DO NOTHING""", slot=slot)
+            return result.rowcount == 1
+
     def dispatch(self, now):
         slots = eligible(now, self.settings.tz)
         results = []
         for job in JOBS:
             if job == "event_check":
-                if self.due(now):
-                    results.append(self.run(job, now))
+                probe = self.claim_bls_probe(now)
+                if probe or self.due(now):
+                    results.append(self.run(job, now, discover_bls=probe))
                 continue
             if job not in slots:
                 continue
