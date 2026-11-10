@@ -1,0 +1,117 @@
+{
+  "status": "REQUEST_SUCCEEDED",
+  "Results": {
+    "series": [
+      {
+        "seriesID": "CUSR0000SA0",
+        "data": [
+          {
+            "year": "2026",
+            "period": "M10",
+            "value": "304.000"
+          },
+          {
+            "year": "2026",
+            "period": "M09",
+            "value": "302.000"
+          },
+          {
+            "year": "2026",
+            "period": "M08",
+            "value": "301.000"
+          },
+          {
+            "year": "2026",
+            "period": "M07",
+            "value": "300.000"
+          }
+        ]
+      },
+      {
+        "seriesID": "CUSR0000SA0L1E",
+        "data": [
+          {
+            "year": "2026",
+            "period": "M10",
+            "value": "320.400"
+          },
+          {
+            "year": "2026",
+            "period": "M09",
+            "value": "320.300"
+          },
+          {
+            "year": "2026",
+            "period": "M08",
+            "value": "320.200"
+          },
+          {
+            "year": "2026",
+            "period": "M07",
+            "value": "320.100"
+          }
+        ]
+      },
+      {
+        "seriesID": "CES0000000001",
+        "data": [
+          {
+            "year": "2026",
+            "period": "M08",
+            "value": "154000"
+          },
+          {
+            "year": "2026",
+            "period": "M09",
+            "value": "154100"
+          }
+        ]
+      },
+      {
+        "seriesID": "LNS14000000",
+        "data": [
+          {
+            "year": "2026",
+            "period": "M08",
+            "value": "4.1"
+          },
+          {
+            "year": "2026",
+            "period": "M09",
+            "value": "4.2"
+          }
+        ]
+      },
+      {
+        "seriesID": "CES0500000003",
+        "data": [
+          {
+            "year": "2026",
+            "period": "M08",
+            "value": "31.10"
+          },
+          {
+            "year": "2026",
+            "period": "M09",
+            "value": "31.20"
+          }
+        ]
+      },
+      {
+        "seriesID": "WPSFD4",
+        "data": [
+          {
+            "year": "2026",
+            "period": "M08",
+            "value": "105.50"
+          },
+          {
+            "year": "2026",
+            "period": "M09",
+            "value": "105.80"
+          }
+        ]
+      }
+    ]
+  }
+}

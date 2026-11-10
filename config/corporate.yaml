@@ -1,0 +1,24 @@
+# CIKs identify the reporting managers. Their 13Fs are disclosure snapshots.
+managers:
+  - {name: Situational Awareness LP, cik: '0002045724'}
+  - {name: Coatue Management LLC, cik: '0001135730'}
+  - {name: Altimeter Capital Management LP, cik: '0001541617'}
+  - {name: ARK Investment Management LLC, cik: '0001697748'}
+  - {name: Berkshire Hathaway Inc, cik: '0001067983'}
+  - {name: Bridgewater Associates LP, cik: '0001350694'}
+# Compare CUSIPs only (option type and share/principal units remain separate).
+cusips:
+  67066G104: NVDA
+  '037833100': AAPL
+  02079K305: GOOGL
+  02079K107: GOOG
+  30303M102: META
+  458140100: INTC
+  88160R101: TSLA
+earnings_feeds:
+  - {cik: '0001045810', url: 'https://investor.nvidia.com/rss/event.aspx'}
+# Register additional confirmed events in the private watchlist's earnings array.
+# Fields: id, cik, title, scheduled_at (offset required), url (official IR page).
+forms: [10-K, 10-Q, 8-K, S-1, SCHEDULE 13D, SCHEDULE 13G, SC 13D, SC 13G, '4']
+lookback_days: 90
+backfill_days: 365

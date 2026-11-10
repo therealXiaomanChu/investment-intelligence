@@ -1,0 +1,36 @@
+topics:
+  AI scaling: [scaling laws, test-time compute, reasoning]
+  Architecture: [mixture of experts, MoE, transformer, attention, state space model]
+  Inference: [KV cache, quantization, speculative decoding]
+  Semiconductors: [HBM, chiplet, advanced packaging, photonic interconnect]
+  AI agents: [tool use, agent reliability, computer use]
+  Autonomous driving: [world model, VLA, end-to-end driving]
+  Crypto protocols: [MEV, rollups, zero knowledge, post-quantum cryptography]
+topic_symbols:
+  AI scaling: [NVDA, GOOGL, OPENAI, ANTHROPIC]
+  Architecture: [NVDA, GOOGL, META]
+  Inference: [NVDA, INTC]
+  Semiconductors: [NVDA, INTC, AAPL]
+  AI agents: [OPENAI, ANTHROPIC, GOOGL]
+  Autonomous driving: [TSLA]
+  Crypto protocols: [BTC, ETH, SOL]
+# Verified OpenAlex A... or I... IDs (or full openalex.org URLs) get a ranking bonus.
+# Display names are deliberately insufficient to identify a person.
+tracked_author_ids:
+  - A5091734792  # Tri Dao
+  - A5070926896  # Song Han
+  - A5067514564  # Tim Dettmers
+  - A5011889606  # Jeff Dean
+  - A5021878400  # Noam Shazeer
+  - A5006446297  # Ilya Sutskever
+  - A5026322200  # Sergey Levine
+  - A5005431772  # Chelsea Finn
+  - A5025255782  # Percy Liang
+tracked_institution_ids:
+  - I4210161460  # OpenAI
+  - I4387930290  # Anthropic
+  - I4210090411  # Google DeepMind (United Kingdom)
+  - I4405258931  # MIT CSAIL
+openalex_url: https://api.openalex.org/works
+max_pages_per_run: 8
+backfill_weeks: 4

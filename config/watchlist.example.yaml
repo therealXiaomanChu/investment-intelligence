@@ -1,0 +1,23 @@
+# Stable identities. Tiers describe monitoring priorities only.
+assets:
+  - {id: alphabet-a, symbol: GOOGL, issuer_id: '0001652044', type: equity, tier: watchlist}
+  - {id: alphabet-c, symbol: GOOG, issuer_id: '0001652044', type: equity, tier: watchlist}
+  - {id: meta, symbol: META, issuer_id: '0001326801', type: equity, tier: watchlist}
+  - {id: intel, symbol: INTC, issuer_id: '0000050863', type: equity, tier: watchlist}
+  - {id: apple, symbol: AAPL, issuer_id: '0000320193', type: equity, tier: watchlist}
+  - {id: nvidia, symbol: NVDA, issuer_id: '0001045810', type: equity, tier: watchlist}
+  - {id: tesla, symbol: TSLA, issuer_id: '0001318605', type: equity, tier: watchlist}
+  - {id: spacex, symbol: SPCX, issuer_id: '0001181412', type: equity, tier: watchlist, valid_from: '2026-06-12'}
+  - {id: openai, symbol: OpenAI, type: private, tier: watchlist}
+  - {id: anthropic, symbol: Anthropic, type: private, tier: watchlist}
+  - {id: bitcoin, symbol: BTC, type: crypto, tier: watchlist}
+  - {id: ethereum, symbol: ETH, type: crypto, tier: watchlist}
+  - {id: solana, symbol: SOL, type: crypto, tier: watchlist}
+  - {id: spy, symbol: SPY, type: benchmark, tier: context}
+  - {id: qqq, symbol: QQQ, type: benchmark, tier: context}
+  - {id: ndx, symbol: NASDAQ-100, type: benchmark, tier: context}
+  - {id: sp500, symbol: S&P 500, type: benchmark, tier: context}
+  - {id: us2y, symbol: US2Y, type: rates, tier: context}
+  - {id: us10y, symbol: US10Y, type: rates, tier: context}
+  - {id: dxy, symbol: DXY, type: index, tier: context}
+  - {id: vix, symbol: VIX, type: index, tier: context}

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investment-intelligence-os"
+version = "1.0.0"
+description = "Source-linked corporate, macro, research and technology briefs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["SQLAlchemy>=2.0,<3", "requests>=2.31,<3", "PyYAML>=6,<7", "beautifulsoup4>=4.12,<5", "exchange-calendars>=4.7,<5", "defusedxml>=0.7,<1", "python-dateutil>=2.8,<3", "python-dotenv>=0.21,<2"]
+
+[project.optional-dependencies]
+cloud = ["psycopg[binary]>=3.2,<4"]
+test = ["pytest>=8,<10", "setuptools>=68", "wheel"]
+
+[project.scripts]
+investment-intelligence = "investment_intelligence.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["investment_intelligence", "investment_intelligence.*"]
+exclude = ["*.__pycache__", "*.__pycache__.*"]
+
+[tool.setuptools.package-data]
+investment_intelligence = ["fixtures/macro/*.html", "fixtures/macro/*.json", "fixtures/macro/*.csv", "fixtures/macro/*.ics", "fixtures/news/*.xml", "fixtures/news/*.json", "fixtures/news/*.html", "fixtures/research/*.xml", "fixtures/research/*.json", "schema.sql"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.private.*", "*.pyc", "*.pyo"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools.data-files]
+"share/investment-intelligence/config" = ["config/corporate.yaml", "config/macro.yaml", "config/news.yaml", "config/research.yaml", "config/sources.yaml", "config/watchlist.example.yaml"]
+"share/investment-intelligence/skills/investment-intelligence" = ["skills/investment-intelligence/SKILL.md"]
+
+[tool.black]
+line-length = 110
+target-version = ["py311"]

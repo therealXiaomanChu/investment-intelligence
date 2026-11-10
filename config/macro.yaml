@@ -1,0 +1,13 @@
+# Official BLS measures. Values are levels in these units (not consensus estimates).
+bls_series:
+  cpi:
+    - {id: CUSR0000SA0, name: CPI-U all items, unit: "index (1982–84=100, SA)"}
+    - {id: CUSR0000SA0L1E, name: CPI-U excluding food and energy, unit: "index (1982–84=100, SA)"}
+  employment:
+    - {id: CES0000000001, name: Total nonfarm payroll employment, unit: "thousand jobs, SA"}
+    - {id: LNS14000000, name: Civilian unemployment rate, unit: "percent, SA"}
+    - {id: CES0500000003, name: Average hourly earnings (private payrolls), unit: "USD per hour, SA"}
+  ppi:
+    - {id: WPSFD4, name: PPI final demand, unit: "index (Nov 2009=100, SA)"}
+calendar_horizon_days: 60
+revision_lookback_days: 90

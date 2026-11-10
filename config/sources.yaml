@@ -1,0 +1,20 @@
+# Source IDs are persistent storage identities. Jobs can share the same cursor.
+sources:
+  - {id: sec_filings, module: corporate, adapter: corporate, url: 'https://data.sec.gov/submissions/', jobs: [sec_poll, after_close, premarket_brief], access: SEC fair access}
+  - {id: sec_13f, module: corporate, adapter: corporate, url: 'https://data.sec.gov/submissions/', jobs: [sec_poll], access: SEC fair access}
+  - {id: earnings_calendar, module: corporate, adapter: corporate, url: 'https://investor.nvidia.com/rss/event.aspx', jobs: [calendar_sync], access: official IR calendar}
+  - {id: earnings_results, module: corporate, adapter: corporate, url: 'https://data.sec.gov/submissions/', jobs: [event_check], access: SEC fair access}
+  - {id: bls_calendar, module: macro, adapter: bls_calendar, url: 'https://www.bls.gov/schedule/news_release/bls.ics', jobs: [calendar_sync], access: public official calendar}
+  - {id: bea_calendar, module: macro, adapter: bea_calendar, url: 'https://www.bea.gov/news/schedule', jobs: [calendar_sync], access: public official calendar}
+  - {id: fed_calendar, module: macro, adapter: fed_calendar, url: 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', jobs: [calendar_sync, event_check], access: public official calendar}
+  - {id: bls_actuals, module: macro, adapter: bls_actuals, url: 'https://api.bls.gov/publicAPI/v2/timeseries/data/', jobs: [event_check, calendar_sync], access: public API}
+  - {id: bea_releases, module: macro, adapter: bea_releases, url: 'https://www.bea.gov/news/current-releases', jobs: [event_check], access: official release notices}
+  - {id: arxiv, module: research, adapter: research, url: 'https://export.arxiv.org/api/query', jobs: [paper_weekly], access: arXiv metadata and optional OpenAlex enrichment, stale_hours: 192}
+  - {id: openai_news, module: news, adapter: news, url: 'https://openai.com/news/rss.xml', jobs: [news_scan, premarket_brief], access: official RSS}
+  - {id: nvidia_news, module: news, adapter: news, url: 'https://blogs.nvidia.com/feed/', jobs: [news_scan, premarket_brief], access: official RSS}
+  - {id: google_ai, module: news, adapter: news, url: 'https://blog.google/technology/ai/rss/', jobs: [news_scan, premarket_brief], access: official RSS}
+  - {id: bitcoin_core, module: news, adapter: news, url: 'https://bitcoincore.org/en/rss.xml', jobs: [crypto_scan], access: official project feed}
+  - {id: ethereum_blog, module: news, adapter: news, url: 'https://blog.ethereum.org/feed.xml', jobs: [crypto_scan, calendar_sync, event_check], access: official project feed}
+  - {id: agave_releases, module: news, adapter: news, url: 'https://api.github.com/repos/anza-xyz/agave/releases', jobs: [crypto_scan], access: public maintainer release metadata}
+  - {id: anthropic_news, module: news, adapter: news, url: 'https://www.anthropic.com/news', jobs: [news_scan, premarket_brief], access: official announcement metadata}
+  - {id: fred_market, module: macro, adapter: fred_market, url: 'https://fred.stlouisfed.org/graph/fredgraph.csv', jobs: [calendar_sync], access: FRED with original series attribution}

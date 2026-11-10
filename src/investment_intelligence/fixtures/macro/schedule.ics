@@ -1,0 +1,11 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Investment Intelligence//Synthetic calendar fixture//EN
+BEGIN:VEVENT
+UID:demo-consumer-prices-2026-10
+DTSTAMP:20261023T150000Z
+DTSTART;TZID=America/New_York:20261102T083000
+SUMMARY:Consumer Price Index for October 2026
+DESCRIPTION:Synthetic offline test release. Not a historical observation.
+END:VEVENT
+END:VCALENDAR

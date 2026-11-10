@@ -1,0 +1,8 @@
+include README.md LICENSE .env.example .gitignore .dockerignore Dockerfile docker-compose.yml
+include config/corporate.yaml config/macro.yaml config/news.yaml config/research.yaml config/sources.yaml config/watchlist.example.yaml
+include skills/investment-intelligence/SKILL.md
+include .github/workflows/tests.yml .github/workflows/pipeline.yml
+recursive-include docs *.md
+recursive-include src/investment_intelligence/fixtures *.xml *.html *.ics *.csv *.json
+include src/investment_intelligence/schema.sql
+global-exclude *.py[cod] *.private.* .DS_Store

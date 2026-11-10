@@ -1,0 +1,377 @@
+"""Job orchestration. Each source commits its observations and successful cursor together."""
+
+from datetime import datetime, timedelta
+from importlib import import_module
+import json
+
+from . import analysis
+from .configuration import Context
+from .delivery import deliver, snapshot, plain
+from .http import Http
+from .models import digest, encode, utc
+from .schedule import JOBS, eligible, week_window
+from .storage import execute, first
+
+ORDER = " ORDER BY importance DESC,event_at DESC,event_key"
+
+
+class Pipeline:
+    def __init__(self, db, settings, http=None):
+        self.db, self.settings = db, settings
+        self.http = http or Http(settings.env)
+        db.register(settings.watchlist["assets"], settings.sources)
+
+    def due(self, now, *, recovery=False):
+        if recovery:
+            condition = "status='delayed' AND next_check IS NULL AND updated_at>=:cut"
+        else:
+            condition = "next_check IS NOT NULL AND next_check<=:now"
+        records = self.db.all(
+            "SELECT * FROM events WHERE " + condition + " ORDER BY event_at,event_key",
+            now=utc(now),
+            cut=utc(now - timedelta(days=7)),
+        )
+        for row in records:
+            row["metadata"] = json.loads(row["metadata"])
+        return records
+
+    def collect(self, source, job, now, backfill, due):
+        db = self.db
+        ident = source["id"]
+        stored = db.all("SELECT cursor FROM sources WHERE source_id=:s", s=ident)[0]
+        ctx = Context(self.settings, now, self.http, job, backfill, json.loads(stored["cursor"]), due)
+        changes = set()
+        try:
+            module = import_module(".collectors." + source["module"], __package__)
+            records = list(module.collect(ctx, source))
+            with db.write() as conn:
+                for record in records:
+                    if record.source_id != ident:
+                        raise ValueError(f"Unexpected source identity from {ident}")
+                    record = db.canonical_record(conn, record)
+                    if db.ingest(conn, record, utc(now)):
+                        changes.add(record.event_key)
+                        if not backfill and job not in {"source_health", "calendar_sync", "paper_weekly"}:
+                            current = first(
+                                conn, "SELECT * FROM events WHERE event_key=:k", k=record.event_key
+                            )
+                            recent = current["event_at"] >= utc(now - timedelta(days=2))
+                            if (
+                                recent
+                                and current["importance"] >= 0.85
+                                and current["status"] in {"published", "released", "revised", "postponed"}
+                            ):
+                                current["fallback_signals"] = [
+                                    dict(row)
+                                    for row in execute(
+                                        conn,
+                                        "SELECT * FROM signals WHERE event_key=:k ORDER BY asset_id",
+                                        k=current["event_key"],
+                                    ).mappings()
+                                ]
+                                current["alert_urls"] = [
+                                    r[0]
+                                    for r in execute(
+                                        conn,
+                                        """SELECT DISTINCT d.canonical_url FROM documents d
+                                    JOIN event_documents ed ON ed.document_id=d.document_id WHERE ed.event_key=:k ORDER BY d.canonical_url""",
+                                        k=current["event_key"],
+                                    )
+                                ]
+                                aid = "alert-" + digest([current["event_key"], current["version"]])[:24]
+                                execute(
+                                    conn,
+                                    """INSERT INTO alert_queue(alert_id,event_key,event_version,event_data,created_at)
+                                    VALUES(:id,:k,:v,:data,:t) ON CONFLICT DO NOTHING""",
+                                    id=aid,
+                                    k=current["event_key"],
+                                    v=current["version"],
+                                    data=encode(current),
+                                    t=utc(now),
+                                )
+                health = "partial" if ctx.warnings else "ok"
+                if ctx.warnings and not records and ctx.next_cursor == ctx.cursor:
+                    health = "unavailable"
+                execute(
+                    conn,
+                    """UPDATE sources SET last_attempt=:t,
+                    last_success=CASE WHEN :ok=1 THEN :t ELSE last_success END,health=:h,
+                    last_error=:e,cursor=:c WHERE source_id=:s""",
+                    t=utc(now),
+                    ok=int(health != "unavailable"),
+                    h=health,
+                    e=" | ".join(ctx.warnings)[:1500] or None,
+                    c=encode(ctx.next_cursor),
+                    s=ident,
+                )
+            return changes, ctx.warnings
+        except Exception as exc:
+            from sqlalchemy.exc import SQLAlchemyError
+
+            if isinstance(exc, SQLAlchemyError):
+                raise
+            # Public messages must omit URLs with key-bearing query parameters and DB connection strings.
+            from .http import SourceError
+
+            msg = (
+                str(exc)[:350]
+                if isinstance(exc, (SourceError, ValueError, RuntimeError))
+                else type(exc).__name__
+            )
+            for key, value in self.settings.env.items():
+                if value and any(k in key for k in ("KEY", "PASSWORD", "DATABASE_URL", "TOKEN")):
+                    msg = msg.replace(str(value), "[redacted]")
+            with db.write() as conn:
+                execute(
+                    conn,
+                    "UPDATE sources SET last_attempt=:t,health='unavailable',last_error=:e WHERE source_id=:s",
+                    t=utc(now),
+                    e=msg,
+                    s=ident,
+                )
+            return set(), [msg]
+
+    def mark_attempts(self, due, now):
+        with self.db.write() as conn:
+            for row in due:
+                current = first(
+                    conn, "SELECT next_check,attempts FROM events WHERE event_key=:k", k=row["event_key"]
+                )
+                if not current or not current["next_check"] or current["next_check"] > utc(now):
+                    continue
+                attempts = current["attempts"] + 1
+                scheduled = row["metadata"].get("check_at") or row["scheduled_at"]
+                expired = attempts >= 6 or now >= datetime.fromisoformat(utc(scheduled)) + timedelta(hours=3)
+                next_at = None if expired else utc(now + timedelta(minutes=min(15, 5 * attempts)))
+                execute(
+                    conn,
+                    """UPDATE events SET attempts=:a,next_check=:next,
+                    status=CASE WHEN :end=1 THEN 'delayed' ELSE status END,
+                    updated_at=CASE WHEN :end=1 THEN :now ELSE updated_at END WHERE event_key=:k""",
+                    a=attempts,
+                    next=next_at,
+                    end=int(expired),
+                    now=utc(now),
+                    k=row["event_key"],
+                )
+
+    def run(self, job, now, *, backfill=False, only=None):
+        if job not in JOBS:
+            raise ValueError(f"Unknown job {job}")
+        db, settings = self.db, self.settings
+        notes, changed, reports = [], set(), []
+        due = (
+            self.due(now, recovery=job == "source_health") if job in {"event_check", "source_health"} else []
+        )
+        if job == "calendar_sync":
+            for row in db.all(
+                """SELECT * FROM events WHERE module='macro' AND status IN ('published','revised','released')
+                    AND event_at>=:cut""",
+                cut=utc(now - timedelta(days=90)),
+            ):
+                row["metadata"] = json.loads(row["metadata"])
+                due.append(row)
+        health = {r["source_id"]: r for r in db.all("SELECT * FROM sources")}
+        for source in settings.sources:
+            sid = source["id"]
+            if only and sid != only:
+                continue
+            relevant = [e for e in due if e["metadata"].get("check_source") == sid]
+            work_job = job
+            if job == "source_health":
+                old = health[sid]
+                when = old["last_success"]
+                stale = bool(
+                    when
+                    and now - datetime.fromisoformat(when) > timedelta(hours=source.get("stale_hours", 48))
+                )
+                if relevant:
+                    work_job = "event_check"
+                elif (old["health"] in {"unavailable", "partial"} or stale) and source["jobs"] != [
+                    "event_check"
+                ]:
+                    work_job = source["jobs"][0]
+                else:
+                    continue
+            elif job not in source["jobs"] or (job == "event_check" and not relevant):
+                continue
+            recover_backfill = job == "source_health"
+            if recover_backfill and sid == "arxiv":
+                recover_backfill = json.loads(health[sid]["cursor"]).get("mode") == "backfill"
+            keys, warnings = self.collect(source, work_job, now, backfill or recover_backfill, relevant)
+            changed.update(keys)
+            notes.extend(f"{sid}: {w}" for w in warnings)
+        if job == "event_check":
+            self.mark_attempts([e for e in due if not only or e["metadata"].get("check_source") == only], now)
+        paper_incomplete = False
+        previous_window = False
+        if job == "paper_weekly":
+            prior = db.all("SELECT cursor,health FROM sources WHERE source_id='arxiv'")
+            paper_incomplete = bool(
+                prior
+                and (prior[0]["health"] == "unavailable" or json.loads(prior[0]["cursor"]).get("incomplete"))
+            )
+            arxiv_cursor = json.loads(prior[0]["cursor"]) if prior else {}
+            if arxiv_cursor.get("end"):
+                previous_window = utc(arxiv_cursor["end"]) != week_window(now, settings.tz)[1]
+        if not db.preview and not paper_incomplete and job not in {"calendar_sync", "source_health"}:
+            try:
+                analysis.analyze(db, settings, now, job)
+            except (ValueError, KeyError, ArithmeticError) as exc:
+                notes.append(f"Model configuration unavailable ({type(exc).__name__}); facts preserved")
+        stamp = now.astimezone(settings.tz).date().isoformat()
+        note = (
+            "\n".join(["Source coverage is partial.", ""] + ["- " + plain(s) for s in notes]) if notes else ""
+        )
+        if job == "source_health":
+            note = health_text(db, settings, now)
+        if job in {"premarket_brief", "after_close", "paper_weekly", "source_health"}:
+            if job == "paper_weekly":
+                start, end = week_window(now, settings.tz)
+                if previous_window:
+                    end = utc(arxiv_cursor["end"])
+                    start = utc(datetime.fromisoformat(end).astimezone(settings.tz) - timedelta(days=7))
+                events = db.all(
+                    "SELECT * FROM events WHERE module='research' AND event_at>=:a AND event_at<:b"
+                    + ORDER
+                    + " LIMIT 5",
+                    a=start,
+                    b=end,
+                )
+                stamp = datetime.fromisoformat(start).astimezone(settings.tz).date().isoformat()
+                title = "Weekly research · top five · week of " + stamp
+                if paper_incomplete:
+                    stamp += "-partial"
+                    title += " (scan in progress)"
+            elif job == "source_health":
+                events, title = [], "Source health · " + stamp
+            else:
+                # A rerun of an already delivered slot replays the immutable report.
+                older = db.all(
+                    """SELECT MAX(created_at) AS t FROM reports WHERE report_id LIKE :prefix
+                    AND report_id<>:current""",
+                    prefix=job + "-%",
+                    current=job + "-" + stamp,
+                )
+                cutoff = older[0]["t"] or utc(now - timedelta(days=3))
+                local = now.astimezone(settings.tz).replace(hour=0, minute=0, second=0, microsecond=0)
+                events = db.all(
+                    """SELECT * FROM events WHERE updated_at<=:b AND (updated_at>:a OR
+                    (event_at>=:start AND event_at<:end AND status IN ('scheduled','estimated','confirmed','delayed')))"""
+                    + ORDER,
+                    a=cutoff,
+                    b=utc(now),
+                    start=utc(local),
+                    end=utc(local + timedelta(days=1)),
+                )
+                title = (
+                    ("Pre-market brief" if job == "premarket_brief" else "After-close brief") + " · " + stamp
+                )
+            rid = f"{job}-{stamp}"
+            reports.append(
+                snapshot(
+                    db, settings, rid, rid + ".md", events, title, now, note, provisional=paper_incomplete
+                )
+            )
+        for pending in db.all(
+            "SELECT * FROM alert_queue WHERE report_id IS NULL ORDER BY created_at,alert_id"
+        ):
+            event = json.loads(pending["event_data"])
+            rid = pending["alert_id"]
+            snapshot(db, settings, rid, rid + ".md", [event], "Material update · " + event["title"], now)
+            with db.write() as conn:
+                execute(conn, "UPDATE alert_queue SET report_id=:id WHERE alert_id=:id", id=rid)
+            reports.append(rid)
+        artifacts = []
+        if not db.preview:
+            # A crash after persisting a report leaves it eligible for local and SMTP recovery.
+            for row in db.all(
+                """SELECT r.report_id FROM reports r LEFT JOIN file_deliveries f ON f.report_id=r.report_id
+                    WHERE r.mail_state='ready' OR f.report_id IS NULL"""
+            ):
+                if row["report_id"] not in reports:
+                    reports.append(row["report_id"])
+            for rid in reports:
+                filename, state = deliver(db, settings, rid)
+                artifacts.append({"file": filename, "email": state})
+                if state in {"sending", "uncertain", "configuration_error"}:
+                    notes.append(f"{rid} SMTP outcome requires inspection")
+        with db.write() as conn:
+            execute(
+                conn,
+                """INSERT INTO jobs(job_name,last_run,last_success,last_error,retry_count) VALUES(:j,:t,CASE WHEN :n=0 THEN :t ELSE NULL END,:err,:n)
+                ON CONFLICT(job_name) DO UPDATE SET last_run=:t,last_success=CASE WHEN :n=0 THEN :t ELSE jobs.last_success END,last_error=:err,
+                retry_count=CASE WHEN :n=0 THEN 0 ELSE jobs.retry_count+1 END""",
+                j=job,
+                t=utc(now),
+                err=" | ".join(notes)[:1500] or None,
+                n=int(bool(notes)),
+            )
+        return {
+            "job": job,
+            "changed_events": len(changed),
+            "coverage": "partial" if notes else "ok",
+            "warnings": notes,
+            "reports": artifacts,
+            "preview": db.preview,
+            "continuation": paper_incomplete or previous_window,
+        }
+
+    def dispatch(self, now):
+        slots = eligible(now, self.settings.tz)
+        results = []
+        for job in JOBS:
+            if job == "event_check":
+                if self.due(now):
+                    results.append(self.run(job, now))
+                continue
+            if job not in slots:
+                continue
+            slot = slots[job]
+            if self.db.all("SELECT 1 FROM slots WHERE job_name=:j AND slot=:s", j=job, s=slot):
+                continue
+            if job == "paper_weekly":
+                recent = self.db.all("SELECT last_run FROM jobs WHERE job_name=:j", j=job)
+                status = self.db.all("SELECT health FROM sources WHERE source_id='arxiv'")
+                delay = 120 if status and status[0]["health"] == "unavailable" else 10
+                if recent and now - datetime.fromisoformat(recent[0]["last_run"]) < timedelta(minutes=delay):
+                    continue
+            result = self.run(job, now)
+            results.append(result)
+            if result["continuation"]:
+                continue
+            # Incomplete arXiv pagination is picked up in a subsequent dispatch before delivery.
+            with self.db.write() as conn:
+                execute(conn, "INSERT INTO slots VALUES(:j,:s) ON CONFLICT DO NOTHING", j=job, s=slot)
+        return results
+
+
+def health_text(db, settings, now):
+    states = {r["source_id"]: r for r in db.all("SELECT * FROM sources")}
+    lines = ["| Connector | Health | Last success (UTC) | Detail |", "|---|---|---|---|"]
+    for s in settings.sources:
+        r = states[s["id"]]
+        health = r["health"]
+        if (
+            health == "ok"
+            and r["last_success"]
+            and now - datetime.fromisoformat(r["last_success"]) > timedelta(hours=s.get("stale_hours", 48))
+        ):
+            health = "stale"
+        detail = r["last_error"] or ""
+        if s["id"] in {"sec_filings", "sec_13f", "earnings_results"} and not settings.env.get(
+            "SEC_USER_AGENT"
+        ):
+            detail = "SEC_USER_AGENT required for SEC requests"
+        lines.append(f"| {s['id']} | {health} | {r['last_success'] or '—'} | {plain(detail)} |")
+    for key in ("OPENALEX_API_KEY", "BLS_API_KEY", "FRED_API_KEY", "LLM_API_KEY", "SMTP_HOST"):
+        lines.append(f"\n{key} {'configured' if settings.env.get(key) else 'absent'}")
+    delayed = db.all("SELECT event_key FROM events WHERE status='delayed' AND next_check IS NULL")
+    if delayed:
+        lines.append("\nExhausted release checks: " + ", ".join(r["event_key"] for r in delayed))
+    pending = db.all(
+        "SELECT report_id,mail_state FROM reports WHERE mail_state IN ('uncertain','sending') OR (mail_state='ready' AND mail_error IS NOT NULL)"
+    )
+    for r in pending:
+        lines.append(f"\nSMTP inspection required for {r['report_id']} ({r['mail_state']})")
+    return "\n".join(lines)

@@ -1,0 +1,17 @@
+services:
+  intelligence:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CONFIG_DIR: /srv/intelligence/config
+    volumes:
+      - intelligence-data:/srv/intelligence/data
+      - intelligence-output:/srv/intelligence/output
+      - ./config:/srv/intelligence/config:ro
+volumes:
+  intelligence-data:
+  intelligence-output:

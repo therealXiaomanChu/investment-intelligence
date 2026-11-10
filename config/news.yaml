@@ -1,0 +1,10 @@
+initial_lookback_days: 7
+backfill_lookback_days: 90
+publishers:
+  openai_news: {name: OpenAI, symbols: [OPENAI], format: rss}
+  nvidia_news: {name: NVIDIA, symbols: [NVDA], format: rss}
+  google_ai: {name: Google, symbols: [GOOG, GOOGL], format: rss}
+  anthropic_news: {name: Anthropic, symbols: [ANTHROPIC], format: anthropic}
+  bitcoin_core: {name: Bitcoin Core, symbols: [BTC], format: rss, network: BTC}
+  ethereum_blog: {name: Ethereum Foundation, symbols: [ETH], format: rss, network: ETH}
+  agave_releases: {name: Anza Agave, symbols: [SOL], format: github_releases, network: SOL}

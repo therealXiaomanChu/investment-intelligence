@@ -1,0 +1,94 @@
+name: Intelligence pipeline
+"on":
+  schedule:
+    - cron: '*/5 * * * *'
+      timezone: America/New_York
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Run the dispatcher or one job
+        type: choice
+        options: [dispatch, calendar_sync, sec_poll, news_scan, crypto_scan, event_check, paper_weekly, premarket_brief, after_close, source_health, doctor]
+        default: dispatch
+      backfill:
+        description: Replay the selected collector's backfill window
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+concurrency:
+  group: investment-intelligence-production
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install '.[cloud]'
+      - name: Load optional private watchlist outside the checkout
+        env:
+          WATCHLIST: ${{ secrets.WATCHLIST }}
+        run: |
+          if [[ -n "$WATCHLIST" ]]; then
+            umask 077
+            printf '%s\n' "$WATCHLIST" > "$RUNNER_TEMP/watchlist.yaml"
+            echo "USES_PRIVATE_WATCHLIST=true" >> "$GITHUB_ENV"
+            echo "WATCHLIST_FILE=$RUNNER_TEMP/watchlist.yaml" >> "$GITHUB_ENV"
+          fi
+      - name: Collect and deliver
+        env:
+          JOB: ${{ inputs.job || 'dispatch' }}
+          BACKFILL: ${{ inputs.backfill }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+          TIMEZONE: ${{ vars.TIMEZONE || 'America/New_York' }}
+          FETCH_LIMIT: ${{ vars.FETCH_LIMIT || '100' }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_MODEL_VERSION: ${{ vars.LLM_MODEL_VERSION }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.openai.com/v1' }}
+          LLM_DAILY_USD: ${{ vars.LLM_DAILY_USD || '0.50' }}
+          LLM_MONTHLY_USD: ${{ vars.LLM_MONTHLY_USD || '10' }}
+          LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '5' }}
+          LLM_INPUT_USD_PER_M: ${{ vars.LLM_INPUT_USD_PER_M }}
+          LLM_OUTPUT_USD_PER_M: ${{ vars.LLM_OUTPUT_USD_PER_M }}
+          LLM_NEWS_MODEL: ${{ vars.LLM_NEWS_MODEL }}
+          LLM_NEWS_MODEL_VERSION: ${{ vars.LLM_NEWS_MODEL_VERSION }}
+          LLM_NEWS_INPUT_USD_PER_M: ${{ vars.LLM_NEWS_INPUT_USD_PER_M }}
+          LLM_NEWS_OUTPUT_USD_PER_M: ${{ vars.LLM_NEWS_OUTPUT_USD_PER_M }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_SECURITY: ${{ vars.SMTP_SECURITY || 'starttls' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+        run: |
+          case "$JOB" in
+            dispatch|doctor) python -m investment_intelligence "$JOB" ;;
+            *)
+              flags=()
+              if [[ "$BACKFILL" == "true" ]]; then flags+=(--backfill); fi
+              python -m investment_intelligence run "$JOB" "${flags[@]}"
+              ;;
+          esac
+      - name: Archive Markdown briefs
+        if: ${{ !cancelled() && (vars.UPLOAD_REPORTS == 'true' || (env.USES_PRIVATE_WATCHLIST != 'true' && vars.UPLOAD_REPORTS != 'false')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: briefs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/**/*.md
+          if-no-files-found: ignore
+          retention-days: 7

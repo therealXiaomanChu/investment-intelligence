@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss version="2.0">
+  <channel>
+    <title>Synthetic fixture</title>
+    <item>
+      <title>Demo labs publish joint inference efficiency benchmark</title>
+      <description>Synthetic news summary for the offline demonstration.</description>
+      <link>https://nvidia.example/announcements/demo</link>
+      <guid>https://nvidia.example/announcements/demo</guid>
+      <pubDate>Sun, 01 Nov 2026 14:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

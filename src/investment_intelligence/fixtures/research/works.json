@@ -1,0 +1,36 @@
+{
+  "results": [
+    {
+      "id": "https://openalex.org/W99999101",
+      "doi": "https://doi.org/10.48550/arxiv.9910.90001",
+      "authorships": [
+        {
+          "author": {
+            "id": "https://openalex.org/A99999101",
+            "display_name": "Alex Example",
+            "orcid": null
+          },
+          "institutions": [
+            {
+              "id": "https://openalex.org/I99999101",
+              "display_name": "Demo Lab North"
+            }
+          ]
+        },
+        {
+          "author": {
+            "id": "https://openalex.org/A99999102",
+            "display_name": "Alex Example",
+            "orcid": null
+          },
+          "institutions": [
+            {
+              "id": "https://openalex.org/I99999102",
+              "display_name": "Demo Lab South"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

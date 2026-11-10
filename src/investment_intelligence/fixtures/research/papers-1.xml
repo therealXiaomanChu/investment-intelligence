@@ -1,0 +1,84 @@
+<?xml version='1.0' encoding='utf-8'?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <opensearch:totalResults>7</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90001v2</id>
+    <title>Demo: Quantum-free KV cache quantization for transformers</title>
+    <published>2026-10-31T11:00:00Z</published>
+    <updated>2026-11-01T18:00:00Z</updated>
+    <summary>Quantization and speculative decoding improve a synthetic inference benchmark. Version 2 adds a latency comparison.</summary>
+    <author>
+      <name>Alex Example</name>
+    </author>
+    <author>
+      <name>Alex Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90002v1</id>
+    <title>Demo: Scaling laws for test-time compute</title>
+    <published>2026-10-30T11:00:00Z</published>
+    <updated>2026-10-30T11:00:00Z</updated>
+    <summary>Reasoning cost changes with available compute in our toy task.</summary>
+    <author>
+      <name>Morgan Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90003v1</id>
+    <title>Demo: Agent reliability under repeated tool use</title>
+    <published>2026-10-29T11:00:00Z</published>
+    <updated>2026-10-29T11:00:00Z</updated>
+    <summary>A synthetic tool use benchmark controls for task repetition.</summary>
+    <author>
+      <name>Morgan Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90004v1</id>
+    <title>Demo: Advanced packaging for chiplet memory</title>
+    <published>2026-10-28T11:00:00Z</published>
+    <updated>2026-10-28T11:00:00Z</updated>
+    <summary>The example models HBM in a toy package.</summary>
+    <author>
+      <name>Morgan Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90005v1</id>
+    <title>Demo: Zero knowledge proofs for rollups</title>
+    <published>2026-10-27T11:00:00Z</published>
+    <updated>2026-10-27T11:00:00Z</updated>
+    <summary>A small rollups simulator measures proof size.</summary>
+    <author>
+      <name>Morgan Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90006v1</id>
+    <title>Demo: A world model for end-to-end driving</title>
+    <published>2026-10-26T11:00:00Z</published>
+    <updated>2026-10-26T11:00:00Z</updated>
+    <summary>Synthetic driving episodes compare two controllers.</summary>
+    <author>
+      <name>Morgan Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/9910.90007v1</id>
+    <title>Demo: Out-of-window demonstration of attention</title>
+    <published>2026-10-24T11:00:00Z</published>
+    <updated>2026-10-24T11:00:00Z</updated>
+    <summary>An earlier paper.</summary>
+    <author>
+      <name>Morgan Example</name>
+    </author>
+    <category term="cs.LG" />
+  </entry>
+</feed>
