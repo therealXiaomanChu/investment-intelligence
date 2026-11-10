@@ -51,7 +51,7 @@ def test_actions_scope_and_dispatch_commands():
         assert workflow["permissions"] == {"contents": "read"}
         assert "pull_request_target" not in workflow["on"]
     pipeline = yaml.safe_load((path / "pipeline.yml").read_text())
-    assert pipeline["on"]["schedule"] == [{"cron": "*/15 * * * *", "timezone": "America/New_York"}]
+    assert pipeline["on"]["schedule"] == [{"cron": "7,22,37,52 * * * *"}]
     assert pipeline["jobs"]["collect"]["permissions"] == {"contents": "write", "issues": "write"}
     guard = pipeline["jobs"]["collect"]["if"]
     assert "default_branch" in guard
