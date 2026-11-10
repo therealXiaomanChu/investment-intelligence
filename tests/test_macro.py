@@ -150,6 +150,10 @@ def test_bea_period_and_estimate_stage_must_match(ctx):
     index = ctx.http.get(macro.BEA_RELEASES).decode().replace("Outlays, September", "Outlays, October")
     index = index.replace("2026-10-29T08:30:00-04:00", "2026-11-25T08:30:00-05:00")
     ctx.http.overrides[macro.BEA_RELEASES] = index.encode()
+    detail = "https://www.bea.gov/news/2026/demo-personal-income-september-2026"
+    ctx.http.overrides[detail] = ctx.http.get(detail).replace(
+        b"<th>August</th><th>September</th>", b"<th>September</th><th>October</th>"
+    )
     [matched] = records(ctx, releases)
     assert matched.event_key == "bea:pce:2026-10" and matched.status == "published"
     assert [(f.value, f.period) for f in matched.facts[:2]] == [("0.2", "2026-09"), ("0.3", "2026-10")]

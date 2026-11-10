@@ -5,7 +5,7 @@ topics:
   Semiconductors: [HBM, chiplet, advanced packaging, photonic interconnect]
   AI agents: [tool use, agent reliability, computer use]
   Autonomous driving: [world model, VLA, end-to-end driving]
-  Crypto protocols: [MEV, rollups, zero knowledge, post-quantum cryptography]
+  Crypto protocols: [MEV, maximal extractable value, miner extractable value, rollups, zero knowledge, post-quantum cryptography]
 topic_symbols:
   AI scaling: [NVDA, GOOGL, OPENAI, ANTHROPIC]
   Architecture: [NVDA, GOOGL, META]
@@ -32,5 +32,8 @@ tracked_institution_ids:
   - I4210090411  # Google DeepMind (United Kingdom)
   - I4405258931  # MIT CSAIL
 openalex_url: https://api.openalex.org/works
+# auto starts with Atom and switches to arXiv's official OAI-PMH service on a transport failure.
+# oai starts with the OAI-PMH version history on networks where export.arxiv.org is unreliable.
+provider: auto
 max_pages_per_run: 8
 backfill_weeks: 4

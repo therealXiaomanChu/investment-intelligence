@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -44,6 +45,39 @@ def test_bls_program_summer_dst_and_title_guard(ctx):
     assert cpi.scheduled_at == "2026-09-10T12:30:00.000000+00:00"
     with pytest.raises(ValueError, match="title"):
         list(macro._bls_program(ctx, src, "ppi", "Producer Price Index", macro.BLS))
+
+
+def test_ny_fed_and_imf_dates_must_agree_before_assigning_a_reference_month(ctx):
+    raw = b"""<div class="ts-data-table-head">November 2026</div><table>
+    <tr><td class="somatdR"><div>13<br><span>
+    <a href="https://www.bls.gov/ppi/">Producer Price Index (PPI)</a><br>(08:30)
+    <a href="https://another.test/">Other</a><br>(10:00)</span></div></td></tr></table>"""
+    month_values = [None] * 13
+    month_values[11] = {"Day": "13", "Period": "Oct/26"}
+    def get(url, **kwargs):
+        if "dsbb.imf.org" in url:
+            return json.dumps([{"CategoryCode": "PPI00", "MonthValues": month_values}]).encode()
+        if url.endswith("i-nov26.html"):
+            return raw
+        raise SourceError("HTTP 403")
+    ctx.http.get = get
+    src = source("bls_calendar", macro.BLS)
+    [record] = list(macro.collect(ctx, src))
+    assert record.event_key == "bls:ppi:2026-10" and record.status == "scheduled"
+    assert record.scheduled_at.startswith("2026-11-13T13:30:00")
+    assert record.metadata["comparison_evidence"] == [macro.IMF_ARC]
+    month_values[11]["Day"] = "12"
+    [tentative] = list(macro.collect(ctx, src))
+    assert tentative.status == "estimated" and tentative.metadata["period"] is None
+    assert not tentative.metadata["check_source"]
+    assert "unconfirmed" in tentative.title
+
+
+def test_bea_can_discover_published_releases_with_an_empty_calendar(ctx):
+    [report] = records(ctx, source("bea_releases", macro.BEA_RELEASES))
+    assert report.event_key == "bea:pce:2026-09"
+    assert report.scheduled_at is None and report.published_at
+    assert report.facts and report.facts[-1].period == "2026-09"
 
 
 H15 = b"""<table id="h15table">

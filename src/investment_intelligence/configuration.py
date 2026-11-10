@@ -76,6 +76,7 @@ class Context:
     cursor: dict
     due: list
     warnings: list = field(default_factory=list)
+    archive: object | None = None
 
     def __post_init__(self):
         self.next_cursor = deepcopy(self.cursor)

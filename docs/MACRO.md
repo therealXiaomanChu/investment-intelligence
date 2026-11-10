@@ -25,6 +25,10 @@ Run `python -m investment_intelligence run calendar_sync` to register official d
 
 Set `market_provider: publishers` in that file to start with H.15 and Cboe on a host that repeatedly times out connecting to FRED. The default is `auto`. H.15's current table has a short window. For older yield history, run `run calendar_sync --source fred_market --backfill` with FRED accessible. When one publisher is down, healthy series still produce observations. A narrower set of available series preserves previously archived facts.
 
+When a BLS program schedule cannot be reached, the collector reads the Federal Reserve Bank of New York's monthly economic indicators calendar. It checks release names, trading dates and Eastern times against the U.S. advance release calendar distributed by the IMF. A reference month is assigned only when both sources give the same publication day for the same indicator. Dates without a corroborating reference month are shown as provisional. The independent BLS data check continues to look for a new official reference period. [NY Fed calendar](https://www.newyorkfed.org/research/calendars/nationalecon_cal.html) · [United States advance release calendar](https://dsbb.imf.org/sdds-plus/country/USA/advance-release-calendar-base)
+
+On a fresh archive, `run calendar_sync --source bea_releases` checks BEA's current releases for recent published GDP and personal income/outlays data, including releases whose dates have rolled off its forward calendar.
+
 The macro integration suite exercises calendar registration, a stale post-release response, exact-period publication, a changed prior month, an amended actual and replay through SQLite. It also covers GDP estimate identity, PCE table extraction, FOMC evidence matching, FRED spread arithmetic, changed source schemas and keyless BLS bootstrap.
 
 ```sh

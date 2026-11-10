@@ -24,6 +24,8 @@ NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
 BLS = "https://www.bls.gov/schedule/news_release/bls.ics"
 BLS_API = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+NY_FED_CALENDAR = "https://www.newyorkfed.org/research/calendars/"
+IMF_ARC = "https://dsbb.imf.org/sdds-plus/country/USA/advance-release-calendar-base"
 BEA = "https://www.bea.gov/news/schedule"
 BEA_RELEASES = "https://www.bea.gov/news/current-releases"
 FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -216,20 +218,122 @@ def _bls_calendar(ctx, source):
         entries = list(_bls_icalendar(ctx, source))
     except (SourceError, ValueError) as primary:
         programs = {"cpi": "cpi", "ppi": "ppi", "employment": "empsit"}
-        successes = 0
+        missing = set()
         for name, group in BLS_GROUPS.items():
             url = urljoin(BLS, programs[group] + ".htm")
             try:
                 entries = list(_bls_program(ctx, source, group, name.title(), url))
-            except (SourceError, ValueError) as exc:
-                ctx.warn(f"BLS {group} program schedule unavailable: {exc}")
+            except (SourceError, ValueError):
+                missing.add(group)
                 continue
-            successes += 1
             yield from entries
-        if not successes:
-            raise ValueError(f"{primary}; all three BLS program schedules unavailable") from primary
+        if missing:
+            try:
+                yield from _ny_fed_bls(ctx, source, missing)
+            except (SourceError, ValueError) as exc:
+                if missing == set(programs):
+                    raise ValueError(f"{primary}; BLS programs and NY Fed calendar unavailable: {exc}") from primary
+                ctx.warn(f"BLS program calendar unavailable for {', '.join(sorted(missing))}: {exc}")
         return
     yield from entries
+
+
+def _imf_bls_periods(ctx):
+    # This is the same public report request issued by the US SDDS Plus calendar.
+    params = {"clientLocPath": IMF_ARC, "CountryCode": "USA", "countryType": "SDDSPlus",
+              "CategoryCode": "ARC", "ContainerID": "SDDS_ARCWeekaheadlink"}
+    data = ctx.http.get("https://dsbb.imf.org/api/report/getARCMetadataReportBase", params=params)
+    if not data:
+        raise ValueError("empty IMF release calendar")
+    series = {"CPI00": "cpi", "EMP00": "employment", "PPI00": "ppi"}
+    periods = {}
+    rows = json.loads(data)
+    if not isinstance(rows, list):
+        raise ValueError("unexpected IMF release calendar response")
+    for row in rows:
+        group = series.get(row.get("CategoryCode"))
+        if not group:
+            continue
+        for month, item in enumerate(row.get("MonthValues") or []):
+            if not 1 <= month <= 12 or not item or not str(item.get("Day", "")).isdigit():
+                continue
+            match = re.fullmatch(r"([A-Za-z]{3})/(\d{2})", item.get("Period") or "")
+            if not match or match[1].lower() not in MONTHS:
+                continue
+            ref_month, year = MONTHS[match[1].lower()], 2000 + int(match[2])
+            release_year = year + int(month < ref_month)
+            release = date(release_year, month, int(item["Day"]))
+            periods[group, release] = f"{year}-{ref_month:02d}"
+    return periods
+
+
+def _ny_fed_bls(ctx, source, missing):
+    try:
+        periods = _imf_bls_periods(ctx)
+    except (SourceError, ValueError, TypeError):
+        periods = {}
+    local = ctx.now.astimezone(NY).date()
+    month = local.replace(day=1)
+    horizon = local + timedelta(days=ctx.config("macro").get("calendar_horizon_days", 60))
+    recovered, provisional = set(), set()
+    errors = []
+    while month <= horizon:
+        next_month = (month + timedelta(days=32)).replace(day=1)
+        url = NY_FED_CALENDAR + f"i-{month:%b%y}.html".lower()
+        try:
+            raw = ctx.http.get(url)
+            page = BeautifulSoup(raw or b"", "html.parser")
+            if not any(h.get_text(strip=True) == month.strftime("%B %Y") for h in page.select(".ts-data-table-head")):
+                raise ValueError("month heading unavailable")
+        except (SourceError, ValueError) as exc:
+            errors.append(f"{month:%Y-%m} {exc}")
+            month = next_month
+            continue
+        for cell in page.select("td.somatdR > div"):
+            day = cell.find(string=True, recursive=False)
+            if not day or not day.strip().isdigit():
+                continue
+            for anchor in cell.find_all("a", href=True):
+                label = anchor.get_text(" ", strip=True)
+                group = BLS_GROUPS.get(label.lower().removesuffix(" (ppi)"))
+                if group not in missing or urlsplit(anchor["href"]).hostname != "www.bls.gov":
+                    continue
+                # The clock immediately after this link belongs to this release.
+                clock = None
+                for sibling in anchor.next_siblings:
+                    if getattr(sibling, "name", None) not in (None, "br"):
+                        break
+                    if isinstance(sibling, str) and sibling.strip():
+                        clock = re.fullmatch(r"\((\d{2}:\d{2})\)", sibling.strip())
+                        break
+                if not clock:
+                    continue
+                release = month.replace(day=int(day.strip()))
+                stamp = datetime.combine(release, time.fromisoformat(clock[1]), NY)
+                if not _window(ctx, stamp):
+                    continue
+                recovered.add(group)
+                period = periods.get((group, release))
+                meta = {"release_group": group, "period": period, "calendar_provider": "Federal Reserve Bank of New York"}
+                if period:
+                    meta["comparison_evidence"] = [IMF_ARC]
+                    key = f"bls:{group}:{period}"
+                else:
+                    provisional.add(group)
+                    key = f"bls-calendar:{group}:{release}"
+                    label += " (reference month unconfirmed)"
+                yield _schedule(ctx, source, key, label, stamp, "bls_actuals" if period else None,
+                                meta, evidence_url=url, status="scheduled" if period else "estimated")
+        month = next_month
+    if not recovered:
+        raise ValueError("No matching NY Fed schedule entries" + ("; " + " | ".join(errors) if errors else ""))
+    if missing - recovered:
+        ctx.warn("NY Fed schedule unavailable for " + ", ".join(sorted(missing - recovered)))
+    if provisional:
+        ctx.warn("NY Fed times verified; reference months pending independent confirmation for "
+                 + ", ".join(sorted(provisional)))
+    if errors:
+        ctx.warn("NY Fed calendar coverage: " + " | ".join(errors))
 
 
 def _bea_release_key(title):
@@ -352,7 +456,8 @@ def _bea_table(body, key, vintage):
 
 def _bea_published(ctx, source):
     due = {d["event_key"]: d for d in _due(ctx, source)}
-    if not due:
+    discover = ctx.job == "calendar_sync" and not due
+    if not due and not discover:
         return
     soup = BeautifulSoup(ctx.http.get(source["url"]), "html.parser")
     rows = soup.select("tr.release-row")
@@ -364,10 +469,10 @@ def _bea_published(ctx, source):
             raise ValueError("Missing published title or date in BEA index")
         title = anchor.get_text(" ", strip=True)
         key = _bea_release_key(title)
-        if key not in due:
+        if not key or (not discover and key not in due):
             continue
         stamp = datetime.fromisoformat(timestamp["datetime"])
-        if stamp.tzinfo is None or stamp > ctx.now:
+        if stamp.tzinfo is None or stamp > ctx.now or (discover and ctx.now - stamp > timedelta(days=90)):
             continue
         url = _link(source["url"], anchor["href"])
         facts = _bea_table(ctx.http.get(url), key, _iso(stamp))
@@ -394,8 +499,10 @@ def _bea_published(ctx, source):
             event_at=_iso(stamp),
             published_at=_iso(stamp),
             importance=0.9,
-            scheduled_at=due[key]["scheduled_at"],
-            metadata=due[key]["metadata"],
+            scheduled_at=due.get(key, {}).get("scheduled_at"),
+            metadata=due.get(key, {}).get("metadata") or {
+                "release_group": key.split(":")[1], "period": key.split(":")[2], "check_source": source["id"],
+            },
             assets=_macro_assets(ctx),
         )
 

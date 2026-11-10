@@ -40,7 +40,7 @@ class Pipeline:
         db = self.db
         ident = source["id"]
         stored = db.all("SELECT cursor FROM sources WHERE source_id=:s", s=ident)[0]
-        ctx = Context(self.settings, now, self.http, job, backfill, json.loads(stored["cursor"]), due)
+        ctx = Context(self.settings, now, self.http, job, backfill, json.loads(stored["cursor"]), due, archive=db)
         changes = set()
         try:
             module = import_module(".collectors." + source["module"], __package__)

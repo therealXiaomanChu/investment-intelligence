@@ -6,17 +6,23 @@ import hashlib
 import json
 import re
 from datetime import datetime, time, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
+from xml.etree.ElementTree import ParseError
 
 from defusedxml.ElementTree import fromstring
 
+from ..http import SourceError
 from ..models import Fact, Record
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 SEARCH = "{http://a9.com/-/spec/opensearch/1.1/}"
+OAI = "{http://www.openarchives.org/OAI/2.0/}"
+RAW = "{http://arxiv.org/OAI/arXivRaw/}"
+OAI_URL = "https://oaipmh.arxiv.org/oai"
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "research"
 PAPER_ID = re.compile(r"(?P<id>(?:\d{4}\.\d{4,5}|[a-zA-Z.-]+/\d{7}))(?:v(?P<version>\d+))?$")
 
@@ -73,10 +79,121 @@ def parse_page(raw):
     return papers, int(total)
 
 
+def _oai_page(raw):
+    root = fromstring(raw)
+    if root.tag != OAI + "OAI-PMH":
+        raise ValueError("Expected arXiv OAI-PMH response")
+    error = root.find(OAI + "error")
+    if error is not None:
+        code = error.get("code")
+        if code == "noRecordsMatch":
+            return [], ""
+        if code == "badResumptionToken":
+            return [], None
+        raise ValueError(f"arXiv OAI-PMH error: {code}")
+    listing = root.find(OAI + "ListRecords")
+    if listing is None:
+        raise ValueError("arXiv OAI-PMH response missing ListRecords")
+    papers = []
+    for record in listing.findall(OAI + "record"):
+        header = record.find(OAI + "header")
+        if header is not None and header.get("status") == "deleted":
+            continue
+        study = record.find(OAI + "metadata/" + RAW + "arXivRaw")
+        if study is None:
+            raise ValueError("arXiv OAI record missing raw version history")
+        identifier = _text(study, RAW + "id")
+        versions = study.findall(RAW + "version")
+        if not PAPER_ID.fullmatch(identifier) or not versions or not _text(study, RAW + "title"):
+            raise ValueError("Incomplete arXiv OAI paper")
+        version = versions[-1].get("version", "")
+        if not re.fullmatch(r"v[1-9]\d*", version):
+            raise ValueError("Invalid arXiv OAI version")
+        # The OAI datestamp includes administrative corrections. Article version
+        # timestamps carry the actual submission time used by the weekly filter.
+        times = []
+        for row in (versions[0], versions[-1]):
+            stamp = parsedate_to_datetime(_text(row, RAW + "date"))
+            if stamp.tzinfo is None:
+                raise ValueError("arXiv OAI timestamp missing timezone")
+            times.append(stamp.astimezone(timezone.utc).isoformat())
+        papers.append(
+            {
+                "id": identifier,
+                "version": int(version[1:]),
+                "title": _text(study, RAW + "title"),
+                "abstract": _text(study, RAW + "abstract"),
+                "published": times[0],
+                "updated": times[1],
+                # Commas can be part of an affiliation or a surname. Preserve the byline as submitted.
+                "authors": [_text(study, RAW + "authors")],
+                "categories": _text(study, RAW + "categories").split(),
+                "doi": _text(study, RAW + "doi").lower().removeprefix("https://doi.org/"),
+                "metadata_transport": "arXiv OAI-PMH arXivRaw",
+            }
+        )
+    return papers, _text(listing, OAI + "resumptionToken")
+
+
+def _harvest(ctx, config, start, end, seen, cursor):
+    day = datetime.fromisoformat(cursor["day"]).date() if cursor.get("day") else start.date()
+    # Announcements can appear after the reporting cutoff (e.g. over the weekend).
+    last_day = min(ctx.now.astimezone(timezone.utc).date(), (end + timedelta(days=7)).date())
+    token, skip = cursor.get("token", ""), cursor.get("skip", 0)
+    selected = {}
+    for _ in range(int(config["max_pages_per_run"])):
+        if day > last_day:
+            break
+        params = {"verb": "ListRecords", "metadataPrefix": "arXivRaw", "from": str(day), "until": str(day)}
+        if token:
+            params = {"verb": "ListRecords", "resumptionToken": token}
+        papers, next_token = _oai_page(ctx.http.get(OAI_URL, params=params))
+        if next_token is None:
+            if not token:
+                raise ValueError("Unexpected arXiv OAI token rejection on initial page")
+            token, skip = "", 0
+            continue
+        for paper in papers[skip:]:
+            skip += 1
+            if not start <= _instant(paper["updated"]) < end:
+                continue
+            matches = _matched(paper, config)
+            if not any(matches.values()):
+                continue
+            key = paper["id"]
+            stamp = f"oai-v{paper['version']}"
+            previous = seen.get(key, "")
+            if previous.startswith("oai-v"):
+                if int(previous.removeprefix("oai-v")) >= paper["version"]:
+                    continue
+            # Preserve a same-version Atom observation and its structured author list
+            # if this installation changes transport halfway through the week.
+            elif previous and ctx.archive is not None:
+                rows = ctx.archive.all("SELECT metadata FROM events WHERE event_key=:k", k="arxiv:" + key)
+                archived_version = json.loads(rows[0]["metadata"]).get("version", 0) if rows else 0
+                if archived_version >= paper["version"]:
+                    seen[key] = f"oai-v{archived_version}"
+                    continue
+            selected[key] = (paper, matches, stamp)
+            if len(selected) >= ctx.limit:
+                break
+        if skip >= len(papers):
+            skip = 0
+            token = next_token
+            if not token:
+                day += timedelta(days=1)
+        if len(selected) >= ctx.limit:
+            break
+    return selected, {"day": str(day), "token": token, "skip": skip}, day > last_day
+
+
 def _matched(paper, config):
     content = paper["title"] + " " + paper["abstract"]
     return {
-        topic: [t for t in terms if re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", content, re.I)]
+        topic: [
+            t for t in terms
+            if re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", content, 0 if t == "MEV" else re.I)
+        ]
         for topic, terms in config["topics"].items()
     }
 
@@ -88,53 +205,64 @@ def _dois(paper):
     return identifiers
 
 
+def _lookup_works(ctx, config, keys):
+    by_doi = {}
+    params = {
+        "filter": "doi:" + "|".join(keys),
+        "per_page": 30,
+        "select": "id,doi,authorships,locations",
+    }
+    if ctx.env.get("OPENALEX_API_KEY"):
+        params["api_key"] = ctx.env["OPENALEX_API_KEY"]
+    body = json.loads(ctx.http.get(config["openalex_url"], params=params))
+    if not isinstance(body.get("results"), list):
+        raise ValueError("OpenAlex works response missing results")
+    for work in body["results"]:
+        candidates = {(work.get("doi") or "").lower().removeprefix("https://doi.org/")}
+        # Merged conference and preprint works can return a publisher DOI
+        # even when filtering by arXiv DOI. Accept only explicit location IDs.
+        for location in work.get("locations") or []:
+            landing = urlparse(location.get("landing_page_url") or "")
+            if landing.hostname in {"doi.org", "dx.doi.org"}:
+                candidates.add(landing.path.lstrip("/").lower())
+            elif landing.hostname == "arxiv.org" and landing.path.startswith("/abs/"):
+                match = PAPER_ID.fullmatch(landing.path.removeprefix("/abs/"))
+                if match:
+                    candidates.add("10.48550/arxiv." + match["id"].lower())
+        matches = candidates.intersection(keys)
+        if not matches or not re.fullmatch(r"https://openalex\.org/W\d+", work.get("id") or ""):
+            continue
+        authors = []
+        for authorship in work["authorships"]:
+            author = authorship.get("author") or {}
+            authors.append(
+                {
+                    "id": author.get("id"),
+                    "name": author.get("display_name"),
+                    "orcid": author.get("orcid"),
+                    "institutions": [
+                        {"id": org.get("id"), "name": org.get("display_name")}
+                        for org in authorship.get("institutions") or []
+                    ],
+                }
+            )
+        for doi in matches:
+            by_doi[doi] = {"url": work["id"], "authors": authors}
+    return by_doi
+
+
 def _metadata(ctx, papers, config):
     by_doi = {}
     keys = sorted({doi for paper in papers for doi in _dois(paper)})
-    # The list endpoint accepts up to 100 OR-ed values. Smaller chunks fit most proxies.
+    # Smaller exact-ID groups fit common proxy URLs. Preserve verified earlier batches if the
+    # following request reaches a quota or fails, and leave unconfirmed paper lookups retryable.
     for start in range(0, len(keys), 30):
-        params = {
-            "filter": "doi:" + "|".join(keys[start : start + 30]),
-            "per_page": 30,
-            "select": "id,doi,authorships,locations",
-        }
-        if ctx.env.get("OPENALEX_API_KEY"):
-            params["api_key"] = ctx.env["OPENALEX_API_KEY"]
-        body = json.loads(ctx.http.get(config["openalex_url"], params=params))
-        if not isinstance(body.get("results"), list):
-            raise ValueError("OpenAlex works response missing results")
-        for work in body["results"]:
-            candidates = {(work.get("doi") or "").lower().removeprefix("https://doi.org/")}
-            # Merged conference and preprint works can return a publisher DOI
-            # even when filtering by arXiv DOI. Accept only explicit location IDs.
-            for location in work.get("locations") or []:
-                landing = urlparse(location.get("landing_page_url") or "")
-                if landing.hostname in {"doi.org", "dx.doi.org"}:
-                    candidates.add(landing.path.lstrip("/").lower())
-                elif landing.hostname == "arxiv.org" and landing.path.startswith("/abs/"):
-                    match = PAPER_ID.fullmatch(landing.path.removeprefix("/abs/"))
-                    if match:
-                        candidates.add("10.48550/arxiv." + match["id"].lower())
-            matches = candidates.intersection(keys)
-            if not matches or not re.fullmatch(r"https://openalex\.org/W\d+", work.get("id") or ""):
-                continue
-            authors = []
-            for authorship in work["authorships"]:
-                author = authorship.get("author") or {}
-                authors.append(
-                    {
-                        "id": author.get("id"),
-                        "name": author.get("display_name"),
-                        "orcid": author.get("orcid"),
-                        "institutions": [
-                            {"id": org.get("id"), "name": org.get("display_name")}
-                            for org in authorship.get("institutions") or []
-                        ],
-                    }
-                )
-            for doi in matches:
-                by_doi[doi] = {"url": work["id"], "authors": authors}
-    return by_doi
+        try:
+            by_doi.update(_lookup_works(ctx, config, keys[start : start + 30]))
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            ctx.warn(f"OpenAlex metadata unavailable ({type(exc).__name__}); arXiv still collected")
+            return by_doi, set(keys[start:])
+    return by_doi, set()
 
 
 def _tracked(people, config):
@@ -193,24 +321,14 @@ def _record(ctx, source, paper, match, config, enrichment):
             "abstract_excerpt": paper["abstract"][:900],
             "abstract_hash": hashlib.sha256(paper["abstract"].encode()).hexdigest(),
             "openalex": enrichment or {"status": "unavailable"},
+            **({"metadata_transport": paper["metadata_transport"]} if "metadata_transport" in paper else {}),
         },
     )
 
 
-def collect(ctx, source):
-    config = ctx.config("research")
-    start, end = weekly_window(ctx.now, ctx.env.get("TIMEZONE", "America/New_York"))
-    if ctx.backfill:
-        start -= timedelta(weeks=max(0, int(config["backfill_weeks"]) - 1))
+def _scan_atom(ctx, source, config, start, end, seen, prior):
     terms = sorted({str(x).replace('"', "") for group in config["topics"].values() for x in group})
     query = " OR ".join(f'abs:"{t}" OR ti:"{t}"' for t in terms)
-    mode = "backfill" if ctx.backfill else "weekly"
-    prior = ctx.cursor if ctx.cursor.get("mode") == mode else {}
-    # Finish an interrupted window before advancing to the latest reporting week.
-    if prior.get("incomplete"):
-        start, end = _instant(prior["start"]), _instant(prior["end"])
-    same_window = prior.get("start") == start.isoformat() and prior.get("end") == end.isoformat()
-    seen = dict(prior.get("seen", {})) if same_window else {}
     selected = {}
     page_size = min(100, max(10, ctx.limit))
     stage = prior.get("stage", "new") if prior.get("incomplete") else "new"
@@ -257,17 +375,42 @@ def collect(ctx, source):
             stage, offset = "revisions", 0
         if len(selected) >= ctx.limit:
             break
-    try:
-        enriched = _metadata(ctx, [entry[0] for entry in selected.values()], config)
-        enrichment_ok = True
-    except Exception as exc:
-        # Never echo a request URL, which may contain an OpenAlex token.
-        ctx.warn(f"OpenAlex metadata unavailable ({type(exc).__name__}); arXiv still collected")
-        enriched, enrichment_ok = {}, False
+    return selected, stage, offset, completed
+
+
+def collect(ctx, source):
+    config = ctx.config("research")
+    start, end = weekly_window(ctx.now, ctx.env.get("TIMEZONE", "America/New_York"))
+    if ctx.backfill:
+        start -= timedelta(weeks=max(0, int(config["backfill_weeks"]) - 1))
+    mode = "backfill" if ctx.backfill else "weekly"
+    prior = ctx.cursor if ctx.cursor.get("mode") == mode else {}
+    # Finish an interrupted window before advancing to the latest reporting week.
+    if prior.get("incomplete"):
+        start, end = _instant(prior["start"]), _instant(prior["end"])
+    same_window = prior.get("start") == start.isoformat() and prior.get("end") == end.isoformat()
+    seen = dict(prior.get("seen", {})) if same_window else {}
+    provider = config.get("provider", "auto")
+    if provider not in {"auto", "oai"}:
+        raise ValueError("research provider must be auto or oai")
+    oai = prior.get("oai") if same_window else None
+    if provider == "auto" and oai is None:
+        try:
+            selected, stage, offset, completed = _scan_atom(ctx, source, config, start, end, seen, prior)
+        except (SourceError, ParseError, ValueError):
+            oai = {}
+    if oai is not None or provider == "oai":
+        oai = oai if prior.get("incomplete") and oai else {}
+        selected, oai, completed = _harvest(ctx, config, start, end, seen, oai)
+        stage, offset = "oai", 0
+        ctx.next_cursor["oai"] = oai
+    else:
+        ctx.next_cursor.pop("oai", None)
+    enriched, pending = _metadata(ctx, [entry[0] for entry in selected.values()], config)
     for paper, match, stamp in selected.values():
         work = next((enriched[i] for i in _dois(paper) if i in enriched), {})
         yield _record(ctx, source, paper, match, config, work)
-        if enrichment_ok:
+        if work or pending.isdisjoint(_dois(paper)):
             seen[paper["id"]] = stamp
     ctx.next_cursor.update(
         start=start.isoformat(),

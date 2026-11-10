@@ -8,7 +8,7 @@ sources:
   - {id: bea_calendar, module: macro, adapter: bea_calendar, url: 'https://www.bea.gov/news/schedule', jobs: [calendar_sync], access: public official calendar}
   - {id: fed_calendar, module: macro, adapter: fed_calendar, url: 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', jobs: [calendar_sync, event_check], access: public official calendar}
   - {id: bls_actuals, module: macro, adapter: bls_actuals, url: 'https://api.bls.gov/publicAPI/v2/timeseries/data/', jobs: [event_check, calendar_sync], access: public API}
-  - {id: bea_releases, module: macro, adapter: bea_releases, url: 'https://www.bea.gov/news/current-releases', jobs: [event_check], access: official release notices}
+  - {id: bea_releases, module: macro, adapter: bea_releases, url: 'https://www.bea.gov/news/current-releases', jobs: [event_check, calendar_sync], access: official release notices}
   - {id: arxiv, module: research, adapter: research, url: 'https://export.arxiv.org/api/query', jobs: [paper_weekly], access: arXiv metadata and optional OpenAlex enrichment, stale_hours: 192}
   - {id: openai_news, module: news, adapter: news, url: 'https://openai.com/news/rss.xml', jobs: [news_scan, premarket_brief], access: official RSS}
   - {id: nvidia_news, module: news, adapter: news, url: 'https://blogs.nvidia.com/feed/', jobs: [news_scan, premarket_brief], access: official RSS}
