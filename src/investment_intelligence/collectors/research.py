@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -16,6 +16,7 @@ from defusedxml.ElementTree import fromstring
 
 from ..http import SourceError
 from ..models import Fact, Record
+from ..schedule import week_window
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
@@ -28,10 +29,8 @@ PAPER_ID = re.compile(r"(?P<id>(?:\d{4}\.\d{4,5}|[a-zA-Z.-]+/\d{7}))(?:v(?P<vers
 
 
 def weekly_window(now, tz_name="America/New_York"):
-    local = now.astimezone(ZoneInfo(tz_name))
-    monday = local.date() - timedelta(days=local.weekday())
-    end = datetime.combine(monday, time(), tzinfo=local.tzinfo)
-    return (end - timedelta(days=7)).astimezone(timezone.utc), end.astimezone(timezone.utc)
+    start, end = week_window(now, ZoneInfo(tz_name))
+    return datetime.fromisoformat(start), datetime.fromisoformat(end)
 
 
 def _text(node, tag):
@@ -54,9 +53,9 @@ def parse_page(raw):
         raise ValueError("arXiv response missing totalResults")
     papers = []
     for entry in root.findall(ATOM + "entry"):
-        identifier = _text(entry, ATOM + "id")
-        match = PAPER_ID.fullmatch(urlparse(identifier).path.removeprefix("/abs/"))
-        if not match or urlparse(identifier).hostname not in {"arxiv.org", "www.arxiv.org"}:
+        identifier = urlparse(_text(entry, ATOM + "id"))
+        match = PAPER_ID.fullmatch(identifier.path.removeprefix("/abs/"))
+        if not match or identifier.hostname not in {"arxiv.org", "www.arxiv.org"}:
             raise ValueError("Unrecognized arXiv entry or API error")
         title = _text(entry, ATOM + "title")
         if not title:
@@ -408,9 +407,10 @@ def collect(ctx, source):
         ctx.next_cursor.pop("oai", None)
     enriched, pending = _metadata(ctx, [entry[0] for entry in selected.values()], config)
     for paper, match, stamp in selected.values():
-        work = next((enriched[i] for i in _dois(paper) if i in enriched), {})
+        dois = _dois(paper)
+        work = next((enriched[i] for i in dois if i in enriched), {})
         yield _record(ctx, source, paper, match, config, work)
-        if work or pending.isdisjoint(_dois(paper)):
+        if work or pending.isdisjoint(dois):
             seen[paper["id"]] = stamp
     ctx.next_cursor.update(
         start=start.isoformat(),

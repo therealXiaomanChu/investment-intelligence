@@ -97,8 +97,6 @@ class Signal:
         if not isinstance(self.one_liner, str) or not (1 <= len(self.one_liner.strip()) <= 2000):
             raise ValueError("Invalid signal text")
         for value, minimum in ((self.importance, 0), (self.confidence, 0), (self.direction, -1)):
-            if value is None and minimum == -1:
-                continue
             if value is not None and (type(value) not in (int, float) or not minimum <= value <= 1):
                 raise ValueError("Signal score out of bounds")
         if self.importance is None or self.horizon not in {

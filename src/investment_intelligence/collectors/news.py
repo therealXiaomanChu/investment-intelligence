@@ -162,16 +162,18 @@ def _slug(value):
     return "-".join(re.findall(r"\w+", unicodedata.normalize("NFKC", value).casefold()))
 
 
-def _title_key(item):
-    # Pool near-identical long headlines on the same UTC date. Short/generic names
-    # keep their canonical URL to prevent merging unrelated announcements.
-    tokens = re.findall(r"[\w]+", unicodedata.normalize("NFKC", item.title).casefold())
-    words = [t for t in tokens if t not in {"the", "a", "an", "and", "to", "of", "for"}]
-    if len(set(words)) < 5:
-        return "news:url:" + hashlib.sha256(item.url.encode()).hexdigest()[:28]
-    signature = " ".join(sorted(words))
-    digest = hashlib.sha256(signature.encode()).hexdigest()[:28]
-    return "news:title:" + item.published[:10] + ":" + digest
+def _initial_key(item, network):
+    # Pool long news headlines on the same UTC date. Short headlines and protocol
+    # announcements use the canonical URL, keeping each network in its own namespace.
+    if not network:
+        tokens = re.findall(r"\w+", unicodedata.normalize("NFKC", item.title).casefold())
+        words = [t for t in tokens if t not in {"the", "a", "an", "and", "to", "of", "for"}]
+        if len(set(words)) >= 5:
+            signature = " ".join(sorted(words))
+            digest = hashlib.sha256(signature.encode()).hexdigest()[:28]
+            return f"news:title:{item.published[:10]}:{digest}"
+    namespace = f"protocol:{network}" if network else "news:url"
+    return namespace + ":" + hashlib.sha256(item.url.encode()).hexdigest()[:28]
 
 
 def _upgrade(item):
@@ -225,20 +227,18 @@ def _upgrade(item):
 def _record(ctx, source, policy, item, previous):
     title = item.title
     network = policy.get("network")
-    symbols = set(policy["symbols"])
+    symbols = {symbol.upper() for symbol in policy["symbols"]}
     text = (title + " " + item.description[:600]).casefold()
     for asset in ctx.watchlist["assets"]:
         names = [asset["symbol"], asset.get("name") or "", *asset.get("aliases", [])]
         if any(
             len(n) > 2 and re.search(r"(?<!\w)" + re.escape(n.casefold()) + r"(?!\w)", text) for n in names
         ):
-            symbols.add(asset["symbol"])
-    assets = tuple(
-        a["id"] for a in ctx.watchlist["assets"] if a["symbol"].upper() in {s.upper() for s in symbols}
-    )
+            symbols.add(asset["symbol"].upper())
+    assets = tuple(a["id"] for a in ctx.watchlist["assets"] if a["symbol"].upper() in symbols)
     if not assets:
         return None
-    key = previous.get("key") or _title_key(item)
+    key = previous.get("key") or ""
     metadata = {
         "publisher": policy["name"],
         "published_precision": item.precision,
@@ -251,9 +251,6 @@ def _record(ctx, source, policy, item, previous):
     if item.precision == "day":
         facts.append(Fact("publication_day", item.published[:10]))
     if network:
-        key = (
-            previous.get("key") or f"protocol:{network}:" + hashlib.sha256(item.url.encode()).hexdigest()[:28]
-        )
         kind, score = "protocol_news", 0.74
         if policy["format"] == "github_releases":
             kind, score = "client_release", 0.77
@@ -290,7 +287,7 @@ def _record(ctx, source, policy, item, previous):
         url=item.url,
         module="news",
         kind=kind,
-        event_key=key,
+        event_key=key or _initial_key(item, network),
         title=title,
         summary=summary,
         event_at=at or item.updated,

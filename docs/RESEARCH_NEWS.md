@@ -4,7 +4,7 @@
 
 `paper_weekly` sets a Monday-to-Monday window in `TIMEZONE`. It queries arXiv's Atom API with the topic terms in `config/research.yaml`. The first pass uses a submission-date filter for new work. A second pass sorts by update time to find revised papers that were originally submitted earlier. The revision's own publication time must be inside the window. Each paper retains its original submission time, stable arXiv ID, versioned evidence URL, authors, technical tags and an abstract excerpt. Full paper text is outside the collector.
 
-OpenAlex enrichment submits OR groups of exact preprint and publisher DOIs. A matched work contributes its OpenAlex URL, author IDs, ORCIDs when present, and institution IDs. Display names alone never join people. Optional `OPENALEX_API_KEY` supplies the operator's access tier. If a lookup fails, the arXiv observation remains available. A successful lookup can yield no work for a recent preprint. The institution and author ID lists in the configuration are ranking preferences within collected papers. The MVP does not crawl every publication from a tracked institution or resolve a list of people from their names.
+OpenAlex enrichment batches exact preprint and publisher DOIs. When OpenAlex merges a preprint with a conference publication, the collector also accepts an explicit matching arXiv ID or DOI in the work's locations. A match contributes the work URL, author IDs, available ORCIDs and institution IDs. Only verified IDs boost a paper's rank. A failed lookup or a recent preprint awaiting indexing retains its arXiv evidence. Optional `OPENALEX_API_KEY` supplies the operator's access tier.
 
 If Atom times out or returns an unusable feed, the collector can harvest the same reporting week through arXiv's official OAI-PMH service. Set `provider: oai` in `config/research.yaml` to use that route directly. It scans daily metadata changes, then filters on each paper's latest **article version timestamp**, preserving its first submission time, exact version and original author byline. An administrative metadata update can happen long after a paper was published. The scan covers announcement delays up to seven days after the cutoff or the current day, whichever comes first. Later changes beyond that range can require a broader harvest. OAI-PMH pagination resumes from the saved day and position, including when a short-lived continuation token expires. The `MEV` crypto tag is case-sensitive so a physics paper's energy unit `MeV` cannot trigger it. [arXiv OAI-PMH formats and datestamps](https://info.arxiv.org/help/oa/index.html)
 
@@ -56,8 +56,6 @@ The default nine author IDs were checked against authorships of the following wo
 | Stanford HAI | Unresolved | The full institute-name search yielded no verified lab-level ID. Stanford University alone does not identify HAI. |
 | Berkeley BAIR | Unresolved | The lab-name search yielded no verified lab-level ID. UC Berkeley affiliations apply to many departments. |
 | NVIDIA Research | Unresolved | The lab-name search yielded no verified lab-level ID. NVIDIA company disclosures are still monitored independently. |
-
-A preprint can merge with its conference publication in OpenAlex. The collector accepts an exact requested DOI or explicit matching DOI/arXiv identifier among the work locations. It never infers identity from title similarity or author-name similarity.
 
 ## Live smoke check
 

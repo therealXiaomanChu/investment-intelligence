@@ -1,6 +1,6 @@
 """Durable reports and delivery claims with stable notification identities."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import getaddresses
 import html
@@ -16,7 +16,7 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from .models import digest, utc
-from .storage import execute
+from .storage import EVIDENCE_URLS_SQL, execute
 
 
 def mail_environment(env):
@@ -84,9 +84,7 @@ def render(db, events, title, now, settings, note=""):
             continue
         lines += ["", "## " + name]
         for e in section:
-            doc = db.all(
-                "SELECT payload,canonical_url FROM documents WHERE document_id=:d", d=e["current_document"]
-            )[0]
+            doc = db.all("SELECT payload FROM documents WHERE document_id=:d", d=e["current_document"])[0]
             signals = db.all("SELECT * FROM signals WHERE event_key=:k ORDER BY asset_id", k=e["event_key"])
             if "fallback_signals" in e and (not signals or signals[0]["version"] != e["version"]):
                 signals = e["fallback_signals"]
@@ -125,15 +123,10 @@ def render(db, events, title, now, settings, note=""):
                     )
                 if len(facts) > 18:
                     lines += ["", f"{len(facts)-18} additional fields in the archived observation."]
-            urls = [
-                d["canonical_url"]
-                for d in db.all(
-                    """SELECT DISTINCT d.canonical_url FROM documents d
-                JOIN event_documents ed ON d.document_id=ed.document_id WHERE ed.event_key=:key ORDER BY d.canonical_url""",
-                    key=e["event_key"],
-                )
-            ]
-            urls = e.get("alert_urls", urls)
+            if "alert_urls" in e:
+                urls = list(e["alert_urls"])
+            else:
+                urls = [d["canonical_url"] for d in db.all(EVIDENCE_URLS_SQL, key=e["event_key"])]
             urls.extend(payload["metadata"].get("comparison_evidence", []))
             urls.extend(payload["metadata"].get("series_urls", {}).values())
             if payload["metadata"].get("openalex", {}).get("url"):
@@ -148,31 +141,25 @@ def render(db, events, title, now, settings, note=""):
 
 
 def snapshot(db, settings, report_id, filename, events, title, now, note="", provisional=False):
-    existing = db.all("SELECT report_id FROM reports WHERE report_id=:r", r=report_id)
-    if not existing or provisional:
-        body = render(db, events, title, now, settings, note)
-        configured = settings.env.get("EMAIL_TRANSPORT") == "github" or settings.env.get("SMTP_HOST")
-        enabled = configured and mail_selected(settings.env, report_id)
-        state = "ready" if enabled and not settings.demo and not provisional else "disabled"
-        with db.write() as conn:
-            execute(
-                conn,
-                """INSERT INTO reports(report_id,filename,body,created_at,mail_state)
-                 VALUES(:r,:f,:b,:now,:state) ON CONFLICT DO NOTHING""",
-                r=report_id,
-                f=filename,
-                b=body,
-                now=utc(now),
-                state=state,
-            )
-            if provisional and existing:
-                execute(
-                    conn,
-                    "UPDATE reports SET body=:body,created_at=:now WHERE report_id=:id",
-                    id=report_id,
-                    body=body,
-                    now=utc(now),
-                )
+    if not provisional and db.all("SELECT 1 FROM reports WHERE report_id=:r", r=report_id):
+        return report_id
+    body = render(db, events, title, now, settings, note)
+    configured = settings.env.get("EMAIL_TRANSPORT") == "github" or settings.env.get("SMTP_HOST")
+    ready = configured and mail_selected(settings.env, report_id) and not settings.demo and not provisional
+    with db.write() as conn:
+        execute(
+            conn,
+            """INSERT INTO reports(report_id,filename,body,created_at,mail_state)
+               VALUES(:r,:f,:b,:now,:state)
+               ON CONFLICT (report_id) DO UPDATE SET body=excluded.body, created_at=excluded.created_at
+               WHERE :provisional=1""",
+            r=report_id,
+            f=filename,
+            b=body,
+            now=utc(now),
+            state="ready" if ready else "disabled",
+            provisional=int(provisional),
+        )
     return report_id
 
 
@@ -211,6 +198,10 @@ def smtp(env, msg):
             raise RuntimeError("One or more recipients refused")
 
 
+class IssueCreationRefused(RuntimeError):
+    """GitHub explicitly rejected issue creation, so a later attempt is safe."""
+
+
 def github_request(env, method, path, **kwargs):
     headers = {
         "Authorization": "Bearer " + env["NOTIFICATION_GITHUB_TOKEN"],
@@ -228,6 +219,8 @@ def github_request(env, method, path, **kwargs):
         )
     except requests.RequestException as exc:
         raise RuntimeError(f"GitHub notification request failed ({type(exc).__name__})") from None
+    if method == "POST" and response.status_code in {400, 401, 403, 404, 410, 422, 429}:
+        raise IssueCreationRefused(f"GitHub refused the notification issue (HTTP {response.status_code})")
     if response.status_code != (201 if method == "POST" else 200):
         raise RuntimeError(f"GitHub notification request returned HTTP {response.status_code}")
     return response.json()
@@ -264,25 +257,24 @@ def github_notification(env, row):
 
     token = "II" + digest(row["report_id"])[:32].upper()
     marker = f"<!-- investment-intelligence {token} -->"
-    results = github_request(
-        env,
-        "GET",
-        "/search/issues",
-        params={
-            "q": f'repo:{repo} is:issue in:title "{token}"',
-            "per_page": 100,
-        },
-    )
-    if results.get("incomplete_results") is not False or not isinstance(results.get("items"), list):
-        raise RuntimeError("GitHub returned an incomplete notification lookup")
-    for issue in results["items"]:
-        if (
-            issue.get("repository_url", "").lower() == ("https://api.github.com" + path).lower()
-            and issue.get("user", {}).get("login") == "github-actions[bot]"
-            and issue.get("title", "").endswith(f"[{token}]")
-            and marker in (issue.get("body") or "")
-        ):
-            return path, None
+    # Read issues directly. A newly accepted issue may not be in GitHub's search index yet.
+    params = {"state": "all", "creator": "github-actions[bot]", "per_page": 100, "page": 1}
+    if row.get("created_at"):
+        # GitHub returns UTC timestamps at second precision.
+        created = datetime.fromisoformat(row["created_at"]).replace(microsecond=0)
+        params["since"] = (created - timedelta(minutes=1)).isoformat()
+    while True:
+        issues = github_request(env, "GET", path + "/issues", params=params)
+        for issue in issues:
+            if (
+                issue["user"]["login"] == "github-actions[bot]"
+                and issue["title"].endswith(f"[{token}]")
+                and marker in (issue["body"] or "")
+            ):
+                return path, None
+        if len(issues) < params["per_page"]:
+            break
+        params["page"] += 1
 
     # A single verified account receives a mention. Keep publisher text in an indented code
     # block so embedded Markdown, images, issue references and HTML cannot affect the issue.
@@ -346,7 +338,7 @@ def send_test_email(env):
     msg = mail_message(env, row)
     try:
         smtp(env, msg)
-    except (OSError, smtplib.SMTPException, RuntimeError) as exc:
+    except (OSError, RuntimeError) as exc:
         raise RuntimeError(f"Email test failed: {type(exc).__name__}") from None
     return "The SMTP relay accepted the test email. Check the configured inbox."
 
@@ -420,6 +412,8 @@ def deliver(db, settings, report_id, send=smtp):
         else:
             send(settings.env, msg)
         state, err = "sent", None
+    except IssueCreationRefused as exc:
+        state, err = "ready", str(exc)
     except Exception as exc:
         # A provider can accept a send then drop the connection. Retain the ambiguous claim.
         state, err = "uncertain", type(exc).__name__
@@ -431,4 +425,4 @@ def deliver(db, settings, report_id, send=smtp):
             e=err,
             r=report_id,
         )
-    return str(target), state
+    return str(target), "configuration_error" if state == "ready" else state

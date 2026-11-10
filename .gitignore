@@ -11,7 +11,7 @@ __pycache__/
 data/
 output/
 private/
-config/*.private.*
+*.private.*
 config/watchlist.yaml
 *.egg-info/
 dist/
@@ -19,6 +19,3 @@ build/
 .pytest_cache/
 .DS_Store
 holdings*.csv
-portfolio.private.*
-*.private.yaml
-*.private.yml

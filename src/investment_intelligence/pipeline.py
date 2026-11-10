@@ -5,13 +5,15 @@ from importlib import import_module
 import json
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from . import analysis
 from .configuration import Context
 from .delivery import deliver, snapshot, plain
 from .http import Http
 from .models import digest, encode, utc
 from .schedule import JOBS, eligible, week_window
-from .storage import execute, first
+from .storage import EVIDENCE_URLS_SQL, execute, first, rows
 
 ORDER = " ORDER BY importance DESC,event_at DESC,event_key"
 
@@ -40,8 +42,13 @@ class Pipeline:
         db = self.db
         ident = source["id"]
         stored = db.all("SELECT cursor FROM sources WHERE source_id=:s", s=ident)[0]
-        ctx = Context(self.settings, now, self.http, job, backfill, json.loads(stored["cursor"]), due, archive=db)
+        ctx = Context(
+            self.settings, now, self.http, job, backfill, json.loads(stored["cursor"]), due, archive=db
+        )
         changes = set()
+        observed_at = utc(now)
+        allow_alerts = not backfill and job not in {"source_health", "calendar_sync", "paper_weekly"}
+        cutoff = utc(now - timedelta(days=2))
         try:
             module = import_module(".collectors." + source["module"], __package__)
             records = list(module.collect(ctx, source))
@@ -50,46 +57,39 @@ class Pipeline:
                     if record.source_id != ident:
                         raise ValueError(f"Unexpected source identity from {ident}")
                     record = db.canonical_record(conn, record)
-                    if db.ingest(conn, record, utc(now)):
-                        changes.add(record.event_key)
-                        if not backfill and job not in {"source_health", "calendar_sync", "paper_weekly"}:
-                            current = first(
-                                conn, "SELECT * FROM events WHERE event_key=:k", k=record.event_key
-                            )
-                            recent = current["event_at"] >= utc(now - timedelta(days=2))
-                            if (
-                                recent
-                                and current["importance"] >= 0.85
-                                and current["status"] in {"published", "released", "revised", "postponed"}
-                            ):
-                                current["fallback_signals"] = [
-                                    dict(row)
-                                    for row in execute(
-                                        conn,
-                                        "SELECT * FROM signals WHERE event_key=:k ORDER BY asset_id",
-                                        k=current["event_key"],
-                                    ).mappings()
-                                ]
-                                current["alert_urls"] = [
-                                    r[0]
-                                    for r in execute(
-                                        conn,
-                                        """SELECT DISTINCT d.canonical_url FROM documents d
-                                    JOIN event_documents ed ON ed.document_id=d.document_id WHERE ed.event_key=:k ORDER BY d.canonical_url""",
-                                        k=current["event_key"],
-                                    )
-                                ]
-                                aid = "alert-" + digest([current["event_key"], current["version"]])[:24]
-                                execute(
-                                    conn,
-                                    """INSERT INTO alert_queue(alert_id,event_key,event_version,event_data,created_at)
-                                    VALUES(:id,:k,:v,:data,:t) ON CONFLICT DO NOTHING""",
-                                    id=aid,
-                                    k=current["event_key"],
-                                    v=current["version"],
-                                    data=encode(current),
-                                    t=utc(now),
-                                )
+                    if not db.ingest(conn, record, observed_at):
+                        continue
+                    changes.add(record.event_key)
+                    if not allow_alerts:
+                        continue
+                    current = first(
+                        conn,
+                        """SELECT * FROM events WHERE event_key=:k AND event_at>=:cut AND importance>=0.85
+                           AND status IN ('published','released','revised','postponed')""",
+                        k=record.event_key,
+                        cut=cutoff,
+                    )
+                    if current is None:
+                        continue
+                    current["fallback_signals"] = rows(
+                        conn,
+                        "SELECT * FROM signals WHERE event_key=:k ORDER BY asset_id",
+                        k=record.event_key,
+                    )
+                    current["alert_urls"] = list(
+                        execute(conn, EVIDENCE_URLS_SQL, key=record.event_key).scalars()
+                    )
+                    aid = "alert-" + digest([record.event_key, current["version"]])[:24]
+                    execute(
+                        conn,
+                        """INSERT INTO alert_queue(alert_id,event_key,event_version,event_data,created_at)
+                           VALUES(:id,:k,:v,:data,:t) ON CONFLICT DO NOTHING""",
+                        id=aid,
+                        k=record.event_key,
+                        v=current["version"],
+                        data=encode(current),
+                        t=observed_at,
+                    )
                 health = "partial" if ctx.warnings else "ok"
                 if ctx.warnings and not records and ctx.next_cursor == ctx.cursor:
                     health = "unavailable"
@@ -106,19 +106,11 @@ class Pipeline:
                     s=ident,
                 )
             return changes, ctx.warnings
+        except SQLAlchemyError:
+            raise
         except Exception as exc:
-            from sqlalchemy.exc import SQLAlchemyError
-
-            if isinstance(exc, SQLAlchemyError):
-                raise
-            # Public messages must omit URLs with key-bearing query parameters and DB connection strings.
-            from .http import SourceError
-
-            msg = (
-                str(exc)[:350]
-                if isinstance(exc, (SourceError, ValueError, RuntimeError))
-                else type(exc).__name__
-            )
+            # Public diagnostics omit secrets and database connection strings.
+            msg = str(exc)[:350] if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__
             for key, value in self.settings.env.items():
                 if value and any(k in key for k in ("KEY", "PASSWORD", "DATABASE_URL", "TOKEN")):
                     msg = msg.replace(str(value), "[redacted]")
@@ -172,7 +164,8 @@ class Pipeline:
             ):
                 row["metadata"] = json.loads(row["metadata"])
                 due.append(row)
-        health = {r["source_id"]: r for r in db.all("SELECT * FROM sources")}
+        if job == "source_health":
+            health = {r["source_id"]: r for r in db.all("SELECT * FROM sources")}
         for source in settings.sources:
             sid = source["id"]
             if only and sid != only:
@@ -210,15 +203,17 @@ class Pipeline:
         previous_window = False
         if job == "paper_weekly":
             prior = db.all("SELECT cursor,health FROM sources WHERE source_id='arxiv'")
-            paper_incomplete = bool(
-                prior
-                and (prior[0]["health"] == "unavailable" or json.loads(prior[0]["cursor"]).get("incomplete"))
-            )
             arxiv_cursor = json.loads(prior[0]["cursor"]) if prior else {}
+            paper_incomplete = bool(
+                prior and (prior[0]["health"] == "unavailable" or arxiv_cursor.get("incomplete"))
+            )
             if arxiv_cursor.get("end"):
                 previous_window = utc(arxiv_cursor["end"]) != week_window(now, settings.tz)[1]
-        if not db.preview and not paper_incomplete and job not in {"calendar_sync", "source_health"} and not (
-            discover_bls and not due
+        if (
+            not db.preview
+            and not paper_incomplete
+            and job not in {"calendar_sync", "source_health"}
+            and not (discover_bls and not due)
         ):
             try:
                 analysis.analyze(db, settings, now, job)
@@ -300,7 +295,9 @@ class Pipeline:
                 filename, state = deliver(db, settings, rid)
                 artifacts.append({"file": filename, "email": state})
                 if state in {"sending", "uncertain", "configuration_error"}:
-                    channel = "GitHub notification" if settings.env.get("EMAIL_TRANSPORT") == "github" else "SMTP"
+                    channel = (
+                        "GitHub notification" if settings.env.get("EMAIL_TRANSPORT") == "github" else "SMTP"
+                    )
                     notes.append(f"{rid} {channel} outcome requires inspection")
         with db.write() as conn:
             execute(
@@ -331,10 +328,14 @@ class Pipeline:
         slot = utc(local.replace(second=0, microsecond=0) - timedelta(minutes=elapsed % 15))
         # A crash must not spend another quota unit on the same optional query.
         with self.db.write() as conn:
-            result = execute(conn, """INSERT INTO slots(job_name,slot)
+            result = execute(
+                conn,
+                """INSERT INTO slots(job_name,slot)
                 SELECT 'bls_probe', :slot WHERE EXISTS (SELECT 1 FROM sources
                 WHERE source_id='bls_calendar' AND health IN ('unavailable', 'partial'))
-                ON CONFLICT DO NOTHING""", slot=slot)
+                ON CONFLICT DO NOTHING""",
+                slot=slot,
+            )
             return result.rowcount == 1
 
     def dispatch(self, now):
@@ -396,5 +397,7 @@ def health_text(db, settings, now):
         "SELECT report_id,mail_state FROM reports WHERE mail_state IN ('uncertain','sending') OR (mail_state='ready' AND mail_error IS NOT NULL)"
     )
     for r in pending:
-        lines.append(f"\n{'GitHub notification' if github else 'SMTP'} inspection required for {r['report_id']} ({r['mail_state']})")
+        lines.append(
+            f"\n{'GitHub notification' if github else 'SMTP'} inspection required for {r['report_id']} ({r['mail_state']})"
+        )
     return "\n".join(lines)

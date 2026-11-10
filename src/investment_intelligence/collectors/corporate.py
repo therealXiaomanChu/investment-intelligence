@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
@@ -19,7 +20,6 @@ from ..models import Fact, Record
 
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
-D = Decimal
 ITEMS = {
     "1.01": "material agreement",
     "1.05": "material cybersecurity incident",
@@ -35,7 +35,6 @@ ITEMS = {
 }
 BASE = "https://data.sec.gov"
 TICKERS = "https://www.sec.gov/files/company_tickers.json"
-NV_CIK = "0001045810"
 SPCX_CIK = "0001181412"
 SEC_FORMS = {"10-Q", "10-K"}
 METRICS = {
@@ -71,7 +70,7 @@ def _at_day(value):
 
 
 def _json(ctx, url, headers):
-    return json.loads(ctx.http.get(url, headers=headers), parse_float=D)
+    return json.loads(ctx.http.get(url, headers=headers), parse_float=Decimal)
 
 
 def _cik(value):
@@ -182,54 +181,44 @@ def financial_facts(cfacts, row):
     for metric, (unit, names) in METRICS.items():
         for name in names:
             entries = [e for e in concepts.get(name, {}).get("units", {}).get(unit, []) if e["accn"] == acc]
-            current = [e for e in entries if e["end"] == end]
-            if not current:
+            # Distinct values for the same period are ambiguous. Exact duplicates collapse.
+            by_period = defaultdict(dict)
+            for entry in entries:
+                if entry["end"] == end:
+                    by_period[_period(entry)][str(entry["val"])] = entry
+            if not by_period:
                 continue
-            # Both YTD and discrete-quarter facts may be reported. Make periods explicit.
-            unique = {(_period(e), str(e["val"])): e for e in current}
-            by_period = defaultdict(list)
-            for entry in unique.values():
-                by_period[_period(entry)].append(entry)
-            for period, items in sorted(by_period.items()):
-                if len(items) == 1:
-                    facts.append(Fact(metric, str(items[0]["val"]), unit, period, row["filingDate"]))
-                    selected[metric, period] = D(str(items[0]["val"]))
-                    if metric == "revenue" and items[0].get("start"):
-                        cur = items[0]
-                        start = date.fromisoformat(cur["start"])
-                        finish = date.fromisoformat(end)
-                        comparable = {
-                            (_period(e), str(e["val"]))
-                            for e in entries
-                            if e.get("start")
-                            and 357 <= (start - date.fromisoformat(e["start"])).days <= 373
-                            and 357 <= (finish - date.fromisoformat(e["end"])).days <= 373
-                            and abs(
-                                (finish - start).days
-                                - (date.fromisoformat(e["end"]) - date.fromisoformat(e["start"])).days
-                            )
-                            <= 7
-                        }
-                        if len(comparable) == 1:
-                            prior_period, prior_value = comparable.pop()
-                            prior = D(prior_value)
-                            facts.append(
-                                Fact("prior_year_revenue", str(prior), unit, prior_period, row["filingDate"])
-                            )
-                            if prior:
-                                yoy = ((selected[metric, period] / prior) - 1) * 100
-                                facts.append(
-                                    Fact(
-                                        "revenue_growth_yoy",
-                                        str(round(yoy, 3)),
-                                        "%",
-                                        period,
-                                        row["filingDate"],
-                                    )
-                                )
+            for period, candidates in sorted(by_period.items()):
+                if len(candidates) != 1:
+                    continue
+                value, entry = next(iter(candidates.items()))
+                facts.append(Fact(metric, value, unit, period, row["filingDate"]))
+                selected[metric, period] = Decimal(value)
+                if metric != "revenue" or not entry.get("start"):
+                    continue
+                start = date.fromisoformat(entry["start"])
+                finish = date.fromisoformat(end)
+                comparable = set()
+                for previous in entries:
+                    if not previous.get("start"):
+                        continue
+                    prior_start = date.fromisoformat(previous["start"])
+                    if not 357 <= (start - prior_start).days <= 373:
+                        continue
+                    prior_end = date.fromisoformat(previous["end"])
+                    if 357 <= (finish - prior_end).days <= 373 and abs(
+                        (finish - start).days - (prior_end - prior_start).days
+                    ) <= 7:
+                        comparable.add((_period(previous), str(previous["val"])))
+                if len(comparable) == 1:
+                    prior_period, prior_value = comparable.pop()
+                    prior = Decimal(prior_value)
+                    facts.append(Fact("prior_year_revenue", str(prior), unit, prior_period, row["filingDate"]))
+                    if prior:
+                        yoy = (selected[metric, period] / prior - 1) * 100
+                        facts.append(Fact("revenue_growth_yoy", str(round(yoy, 3)), "%", period, row["filingDate"]))
             break
-    for metric, period in selected:
-        value = selected[metric, period]
+    for (metric, period), value in selected.items():
         revenue = selected.get(("revenue", period))
         if metric in {"gross_profit", "operating_income"} and revenue:
             margin = "gross_margin" if metric == "gross_profit" else "operating_margin"
@@ -326,21 +315,21 @@ def _slices(ctx, subjects):
         yield subject, quota + int(index < extra)
 
 
-def _filings(ctx, conf, source, headers):
+def _filings(ctx, conf, headers):
     for (cik, assets), limit in _slices(ctx, list(_issuers(ctx, headers).items())):
         try:
             cache = {}
-            stream = dict(ctx.cursor.get(cik, {}))
+            state = dict(ctx.cursor.get(cik, {}))
             window = int(conf.get("backfill_days" if ctx.backfill else "lookback_days", 90))
             floor = (ctx.now.date() - timedelta(days=window)).isoformat()
-            floor = min(floor, stream.get("last_check", floor), stream.get("pending_from", floor))
+            floor = min(floor, state.get("last_check", floor), state.get("pending_from", floor))
             sub, rows = _submissions(ctx, cik, headers, floor)
             symbols = set(sub.get("tickers", []))
             if symbols:
                 assets = [a for a in assets if a["symbol"] in symbols]
                 if not assets:
                     raise ValueError("current SEC ticker(s) do not match configured issuer")
-            seen = dict(stream.get("seen", {}))
+            seen = dict(state.get("seen", {}))
             eligible = sorted(
                 (
                     r
@@ -351,7 +340,6 @@ def _filings(ctx, conf, source, headers):
                 ),
                 key=lambda r: (r["filingDate"], r["accessionNumber"]),
             )
-            state = dict(stream)
             if ctx.backfill:
                 # Consecutive manual invocations page through the configured history oldest first.
                 previous = state.get("backfill_after", "")
@@ -401,9 +389,8 @@ def _xml_block(document):
 
 
 def parse_holdings(body, amendment=False):
-    positions = defaultdict(lambda: [D(0), D(0), ""])
+    positions = defaultdict(lambda: [Decimal(0), Decimal(0), ""])
     amendment_type = None
-    tables = 0
     for part in re.findall(rb"<DOCUMENT>(.*?)</DOCUMENT>", body, re.I | re.S):
         typ = re.search(rb"<TYPE>\s*([^\r\n<]+)", part, re.I)
         if not typ:
@@ -416,7 +403,6 @@ def parse_holdings(body, amendment=False):
         root = _xml_block(part)
         if root.tag.split("}")[-1] != "informationTable":
             raise ValueError("Unexpected 13F information table root")
-        tables += 1
         for row in root.findall(".//{*}infoTable"):
             cusip = row.findtext("{*}cusip", "").strip().upper()
             option = row.findtext("{*}putCall", "").strip().upper() or "NON_OPTION"
@@ -429,10 +415,10 @@ def parse_holdings(body, amendment=False):
                 raise ValueError("Unknown security identity or units in 13F")
             key = (cusip, option, unit)
             position = positions[key]
-            position[0] += D(row.findtext("{*}shrsOrPrnAmt/{*}sshPrnamt"))
-            position[1] += D(row.findtext("{*}value"))
+            position[0] += Decimal(row.findtext("{*}shrsOrPrnAmt/{*}sshPrnamt"))
+            position[1] += Decimal(row.findtext("{*}value"))
             position[2] = row.findtext("{*}nameOfIssuer", "").strip()
-    if not tables or not positions:
+    if not positions:
         raise ValueError("13F information table absent or empty")
     return positions, amendment_type
 
@@ -448,7 +434,7 @@ def _holdings_at(ctx, cik, rows, headers):
             holdings = positions
         elif change == "NEW HOLDINGS" and holdings:
             for key, (shares, value, issuer) in positions.items():
-                old = holdings.get(key, [D(0), D(0), issuer])
+                old = holdings.get(key, [Decimal(0), Decimal(0), issuer])
                 holdings[key] = [old[0] + shares, old[1] + value, issuer]
         else:
             raise ValueError(f"Unsupported amendment chain ({change}) in {acc}")
@@ -459,8 +445,8 @@ def _changes(before, after, period, vintage):
     totals = [sum(row[1] for row in side.values()) for side in (before, after)]
     changes, facts = [], []
     for key in sorted(set(before) | set(after)):
-        old = before.get(key, [D(0), D(0), ""])
-        new = after.get(key, [D(0), D(0), ""])
+        old = before.get(key, [Decimal(0), Decimal(0), ""])
+        new = after.get(key, [Decimal(0), Decimal(0), ""])
         change = new[0] - old[0]
         action = (
             "new"
@@ -595,6 +581,7 @@ def _institutions(ctx, conf, source, headers):
 
 def _calendar(ctx, conf, source):
     issuers = _issuers(ctx)
+    today = ctx.now.astimezone(NY).date()
     for feed in conf["earnings_feeds"]:
         cik = _cik(feed["cik"])
         if cik not in issuers:
@@ -611,11 +598,7 @@ def _calendar(ctx, conf, source):
                 if not match:
                     raise ValueError("Earnings feed changed its date format")
                 day = datetime.strptime(match[1], "%m/%d/%Y").date()
-                if (
-                    not ctx.now.astimezone(NY).date()
-                    <= day
-                    <= ctx.now.astimezone(NY).date() + timedelta(days=60)
-                ):
+                if not today <= day <= today + timedelta(days=60):
                     continue
                 url = item.findtext("link", "")
                 guid = item.findtext("guid") or url
@@ -706,19 +689,14 @@ def _earnings_results(ctx, source, headers):
             ):
                 continue
             filing = _filing(ctx, cik, sub["name"], _asset_ids(issuers[cik], day), row, headers, {})
-            yield Record(
+            yield replace(
+                filing,
                 source_id=source["id"],
                 external_id=row["accessionNumber"] + ":" + event["event_key"],
-                url=filing.url,
-                module="corporate",
                 kind="earnings",
                 event_key=event["event_key"],
                 title=f"{sub['name']} earnings disclosure",
-                summary=filing.summary,
-                event_at=pub,
-                published_at=pub,
-                assets=filing.assets,
-                facts=filing.facts,
+                status="published",
                 importance=0.9,
                 metadata={**meta, "filing_accession": row["accessionNumber"]},
             )
@@ -732,7 +710,7 @@ def collect(ctx, source):
         return
     headers = _sec_headers(ctx)
     if source["id"] == "sec_filings":
-        yield from _filings(ctx, conf, source, headers)
+        yield from _filings(ctx, conf, headers)
     elif source["id"] == "sec_13f":
         yield from _institutions(ctx, conf, source, headers)
     elif source["id"] == "earnings_results":

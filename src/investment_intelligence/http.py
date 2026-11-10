@@ -28,8 +28,9 @@ class Http:
         return self.request("POST", url, headers=headers, json=payload)
 
     def request(self, method, url, **kwargs):
-        host = urlsplit(url).hostname
-        if urlsplit(url).scheme != "https" or not host:
+        parts = urlsplit(url)
+        host = parts.hostname
+        if parts.scheme != "https" or not host:
             raise SourceError("Public sources require HTTPS")
         sec = host == "sec.gov" or host.endswith(".sec.gov")
         agent = (
@@ -95,7 +96,8 @@ class FixtureHttp:
             result = module.demo_response(url, method, payload, self.phase)
             if result is not None:
                 return result
-        raise SourceError(f"No offline response registered for {urlsplit(url).hostname}{urlsplit(url).path}")
+        parts = urlsplit(url)
+        raise SourceError(f"No offline response registered for {parts.hostname}{parts.path}")
 
     def get(self, url, headers=None, params=None):
         return self.request("GET", url, params=params)

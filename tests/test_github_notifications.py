@@ -38,9 +38,11 @@ class GitHub:
         assert headers["Authorization"] == "Bearer test-token" and not allow_redirects
         if method == "GET" and url == base:
             data = self.info
-        elif method == "GET" and url == "https://api.github.com/search/issues":
-            assert ("repo:" + REPO) in kwargs["params"]["q"]
-            data = {"incomplete_results": False, "items": self.issues}
+        elif method == "GET" and url == base + "/issues":
+            assert kwargs["params"]["creator"] == "github-actions[bot]"
+            params = kwargs["params"]
+            offset = (params["page"] - 1) * params["per_page"]
+            data = self.issues[offset : offset + params["per_page"]]
         else:
             assert method == "POST" and url == base + "/issues"
             self.before_post()
@@ -61,6 +63,8 @@ def test_test_email_is_db_free_and_reuses_an_existing_issue(monkeypatch, tmp_pat
     assert cli.main(["test-email"]) == cli.main(["test-email"]) == 0
     assert len(api.issues) == 1 and api.issues[0]["body"].count("@owner") == 1
     assert "test-email-123" in api.issues[0]["body"] and not list(tmp_path.iterdir())
+    api.issues[:0] = [dict(api.issues[0], title="A different alert") for _ in range(100)]
+    assert cli.main(["test-email"]) == 0 and len(api.issues) == 101
 
 
 @pytest.mark.parametrize(

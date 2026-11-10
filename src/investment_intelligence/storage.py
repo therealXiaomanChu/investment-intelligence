@@ -14,6 +14,11 @@ from sqlalchemy.engine import make_url
 from .models import digest, encode, utc
 
 
+EVIDENCE_URLS_SQL = """SELECT DISTINCT d.canonical_url FROM event_documents ed
+    JOIN documents d ON ed.document_id=d.document_id
+    WHERE ed.event_key=:key ORDER BY d.canonical_url"""
+
+
 def execute(conn, sql, **params):
     return conn.execute(text(sql), params)
 
@@ -263,6 +268,14 @@ class Database:
                     title=record.title,
                     summary=record.summary,
                 )
+        else:
+            execute(
+                conn,
+                "UPDATE events SET version=:v,updated_at=:now WHERE event_key=:key",
+                v=ev_version,
+                now=now,
+                key=key,
+            )
         execute(conn, "INSERT INTO event_documents VALUES(:key,:doc)", key=key, doc=doc)
         for i, f in enumerate(record.facts):
             execute(
@@ -277,42 +290,19 @@ class Database:
                 period=f.period,
                 vintage=f.vintage or record.published_at or now,
             )
-        if not current:
-            execute(
-                conn,
-                "UPDATE events SET version=:v,updated_at=:now WHERE event_key=:key",
-                v=ev_version,
-                now=now,
-                key=key,
-            )
-        urls = [
-            r["canonical_url"]
-            for r in rows(
-                conn,
-                """SELECT DISTINCT d.canonical_url FROM event_documents ed
-            JOIN documents d ON ed.document_id=d.document_id WHERE ed.event_key=:key ORDER BY d.canonical_url""",
-                key=key,
-            )
+        urls = list(execute(conn, EVIDENCE_URLS_SQL, key=key).scalars())
+        secondary = [
+            *record.metadata.get("comparison_evidence", []),
+            *record.metadata.get("series_urls", {}).values(),
         ]
-        urls.extend(
-            u
-            for u in record.metadata.get("comparison_evidence", [])
-            if u.startswith("https://") and u not in urls
-        )
-        urls.extend(
-            u
-            for u in record.metadata.get("series_urls", {}).values()
-            if u.startswith("https://") and u not in urls
-        )
+        urls.extend(url for url in secondary if url.startswith("https://") and url not in urls)
         line, score, status = (
             (record.summary, record.importance, record.status)
             if current
             else (old["summary"], old["importance"], old["status"])
         )
-        prior_assets = [
-            r["asset_id"] for r in rows(conn, "SELECT asset_id FROM signals WHERE event_key=:key", key=key)
-        ]
-        assets = set(record.assets) | set(prior_assets)
+        assets = set(record.assets)
+        assets.update(execute(conn, "SELECT asset_id FROM signals WHERE event_key=:key", key=key).scalars())
         if assets - {"market"}:
             assets.discard("market")
             execute(conn, "DELETE FROM signals WHERE event_key=:key AND asset_id='market'", key=key)

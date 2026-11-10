@@ -218,8 +218,8 @@ def _item(row, key, urls):
 def _batches(db, settings, now, job):
     # Group ordinary items even if a filing or paper falls between them in the queue.
     groups = {False: deque(), True: deque()}
+    env = settings.env
     for priority, row in enumerate(candidates(db, settings, now, job == "paper_weekly")):
-        env = settings.env
         ordinary = row["module"] == "news" and row["importance"] < 0.85
         news_model = ordinary and env.get("LLM_NEWS_MODEL")
         model = news_model or env.get("LLM_MODEL")
@@ -361,15 +361,7 @@ def analyze(db, settings, now, job, sender=post_chat):
             signals = _signals(response, batch)
             for row, key, _ in batch:
                 save(db, row, signals[key], key)
-        except (
-            KeyError,
-            ValueError,
-            IndexError,
-            TypeError,
-            AttributeError,
-            OSError,
-            requests.RequestException,
-        ) as exc:
+        except (KeyError, ValueError, IndexError, TypeError, AttributeError, OSError) as exc:
             # Timeouts can be billed. Keep a reservation unless the provider reported actual usage.
             logging.warning("Analysis deferred for %s (%s)", model, type(exc).__name__)
     return calls

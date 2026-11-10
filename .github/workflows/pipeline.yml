@@ -49,7 +49,6 @@ jobs:
           if [[ -n "$WATCHLIST" ]]; then
             umask 077
             printf '%s\n' "$WATCHLIST" > "$RUNNER_TEMP/watchlist.yaml"
-            echo "USES_PRIVATE_WATCHLIST=true" >> "$GITHUB_ENV"
             echo "WATCHLIST_FILE=$RUNNER_TEMP/watchlist.yaml" >> "$GITHUB_ENV"
           fi
       - name: Collect and deliver
@@ -93,8 +92,7 @@ jobs:
           SMTP_TO: ${{ secrets.SMTP_TO }}
         run: |
           if [[ "$JOB" == "test-email" ]]; then
-            python -m investment_intelligence test-email
-            exit
+            exec python -m investment_intelligence test-email
           fi
           umask 077
           export CLOUD_STATE_DIR="$RUNNER_TEMP/intelligence-state"
@@ -114,7 +112,7 @@ jobs:
               ;;
           esac
       - name: Archive Markdown briefs
-        if: ${{ !cancelled() && (vars.UPLOAD_REPORTS == 'true' || (github.event.repository.private && env.USES_PRIVATE_WATCHLIST != 'true' && vars.UPLOAD_REPORTS != 'false')) }}
+        if: ${{ !cancelled() && (vars.UPLOAD_REPORTS == 'true' || (github.event.repository.private && !env.WATCHLIST_FILE && vars.UPLOAD_REPORTS != 'false')) }}
         uses: actions/upload-artifact@v4
         with:
           name: briefs-${{ github.run_id }}-${{ github.run_attempt }}

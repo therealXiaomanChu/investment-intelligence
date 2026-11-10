@@ -34,15 +34,12 @@ def week_window(now, zone):
 
 def eligible(now, zone):
     local = now.astimezone(zone)
-    day = local.date()
-    start = datetime.combine(day, time(), zone)
+    start = datetime.combine(local.date(), time(), zone)
     minutes = local.hour * 60 + local.minute
-    slots = {}
     # Round in UTC so both occurrences of the repeated hour in autumn stay distinct.
     instant = now.astimezone(ZoneInfo("UTC"))
-    feed_slot = utc(instant.replace(minute=instant.minute // 15 * 15, second=0, microsecond=0))
-    for job in ("news_scan", "crypto_scan"):
-        slots[job] = feed_slot
+    quarter_hour = utc(instant.replace(minute=instant.minute // 15 * 15, second=0, microsecond=0))
+    slots = {"news_scan": quarter_hour, "crypto_scan": quarter_hour}
     for job, minute in (("calendar_sync", 450), ("source_health", 365)):
         if minutes >= minute:
             slots[job] = utc(start + timedelta(minutes=minute))
@@ -54,8 +51,7 @@ def eligible(now, zone):
     ny = now.astimezone(ZoneInfo("America/New_York"))
     market_minutes = ny.hour * 60 + ny.minute
     if ny.weekday() < 5 and 360 <= market_minutes < 1335:
-        slot = min(1320, market_minutes // 15 * 15)
-        slots["sec_poll"] = utc(ny.replace(hour=slot // 60, minute=slot % 60, second=0, microsecond=0))
+        slots["sec_poll"] = quarter_hour
     if calendar(ny.year).is_session(ny.date().isoformat()):
         for job, hour, minute in (("premarket_brief", 9, 10), ("after_close", 16, 40)):
             slot = ny.replace(hour=hour, minute=minute, second=0, microsecond=0)

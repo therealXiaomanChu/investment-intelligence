@@ -80,8 +80,8 @@ def run(args):
             return db.all(
                 "SELECT report_id,created_at,mail_state FROM reports ORDER BY created_at DESC, report_id"
             )
-        db.register(settings.watchlist["assets"], settings.sources)
         if args.command == "doctor":
+            db.register(settings.watchlist["assets"], settings.sources)
             return health_text(db, settings, datetime.now(timezone.utc))
         pipeline = Pipeline(db, settings)
         if args.command == "serve":

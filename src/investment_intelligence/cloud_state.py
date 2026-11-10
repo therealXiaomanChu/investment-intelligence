@@ -17,7 +17,11 @@ DB_NAME = "intelligence.sqlite3"
 
 
 def git(*args, data=None):
-    return subprocess.run(["git", *args], input=data, check=True, stdout=subprocess.PIPE).stdout
+    return subprocess.check_output(["git", *args], input=data)
+
+
+def git_oid(*args, data=None):
+    return git(*args, data=data).decode("ascii").strip()
 
 
 def cipher_for(env):
@@ -58,14 +62,23 @@ def verify(dbfile):
             raise ValueError("Stored SQLite state has an unknown schema")
 
 
+def remote_head():
+    return git("ls-remote", "--refs", "origin", REF).decode().partition("\t")[0]
+
+
+def read_manifest(head, cipher):
+    header = git("show", f"{head}:manifest")
+    encoding, separator, encoded = header.partition(b"\n")
+    if not separator or encoding != (b"fernet-v1" if cipher else b"plain-v1"):
+        raise ValueError("State encryption mode or format differs from current settings")
+    return json.loads(unpack(encoded, cipher))
+
+
 def restore(env, initialize=False):
     directory = Path(env["CLOUD_STATE_DIR"]).resolve()
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     cipher = cipher_for(env)
-    listing = subprocess.run(
-        ["git", "ls-remote", "--exit-code", "--refs", "origin", REF], stdout=subprocess.PIPE
-    )
-    if listing.returncode == 2:
+    if not remote_head():
         if not initialize:
             raise RuntimeError(
                 "State branch missing. Run workflow_dispatch with initialize_state on first setup."
@@ -77,14 +90,9 @@ def restore(env, initialize=False):
         database.close()
         checkpoint(env, directory / DB_NAME)
         return
-    listing.check_returncode()
     git("fetch", "--quiet", "--depth=1", "--no-tags", "origin", REF)
-    head = git("rev-parse", "--verify", "FETCH_HEAD^{commit}").decode().strip()
-    header = git("show", f"{head}:manifest")
-    encoding, separator, encoded = header.partition(b"\n")
-    if not separator or encoding != (b"fernet-v1" if cipher else b"plain-v1"):
-        raise ValueError("State encryption mode or format differs from current settings")
-    manifest = json.loads(unpack(encoded, cipher))
+    head = git_oid("rev-parse", "--verify", "FETCH_HEAD^{commit}")
+    manifest = read_manifest(head, cipher)
     size = manifest["size"]
     if not isinstance(size, int) or size < 1:
         raise ValueError("Invalid SQLite state size")
@@ -102,7 +110,6 @@ def restore(env, initialize=False):
     if digest.hexdigest() != manifest["sha256"]:
         raise ValueError("SQLite state checksum mismatch")
     verify(dbfile)
-    (directory / "digest").write_text(digest.hexdigest())
     (directory / "head").write_text(head)
 
 
@@ -112,21 +119,16 @@ def checkpoint(env, dbfile):
     if dbfile != directory / DB_NAME:
         raise ValueError("Checkpoint path does not match the restored SQLite database")
     head_file = directory / "head"
-    digest_file = directory / "digest"
     pending = directory / "pending-push"
-    if pending.exists():
+    retrying_push = pending.exists()
+    if retrying_push:
         # A failed push can have updated the ref before the connection dropped.
         # Recover our own exact snapshot, never a concurrent writer's generation.
-        attempted_head, attempted_digest = pending.read_text().split()
-        refs = git("ls-remote", "--refs", "origin", REF).decode().split()
-        remote_head = refs[0] if refs else ""
-        if remote_head == attempted_head:
-            head_file.write_text(attempted_head)
-            digest_file.write_text(attempted_digest)
-        elif remote_head == head_file.read_text():
-            digest_file.unlink(missing_ok=True)
-        else:
+        candidate = pending.read_text().split()[0]
+        remote = remote_head()
+        if remote not in (candidate, head_file.read_text()):
             raise RuntimeError("The remote state was changed by another writer")
+        head_file.write_text(remote)
         pending.unlink()
     previous = head_file.read_text()
     cipher = cipher_for(env)
@@ -138,38 +140,31 @@ def checkpoint(env, dbfile):
         blobs = {}
         with copy.open("rb") as snapshot:
             digest = hashlib.file_digest(snapshot, "sha256").hexdigest()
-            if digest_file.exists() and digest_file.read_text() == digest:
+            if previous and not retrying_push and read_manifest(previous, cipher)["sha256"] == digest:
                 return
             snapshot.seek(0)
             for index, block in enumerate(iter(lambda: snapshot.read(CHUNK), b"")):
                 payload = pack(zlib.compress(block, level=5), cipher)
-                blobs[f"part-{index:08d}"] = (
-                    git("hash-object", "-w", "--stdin", data=payload).decode().strip()
-                )
+                blobs[f"part-{index:08d}"] = git_oid("hash-object", "-w", "--stdin", data=payload)
         metadata = json.dumps({"size": copy.stat().st_size, "sha256": digest}).encode()
         header = (b"fernet-v1\n" if cipher else b"plain-v1\n") + pack(metadata, cipher)
-        blobs["manifest"] = git("hash-object", "-w", "--stdin", data=header).decode().strip()
+        blobs["manifest"] = git_oid("hash-object", "-w", "--stdin", data=header)
         entries = "".join(f"100644 blob {oid}\t{name}\n" for name, oid in sorted(blobs.items()))
-        tree = git("mktree", data=entries.encode()).decode().strip()
+        tree = git_oid("mktree", data=entries.encode())
         # Intentionally parentless: the state branch tracks only its current snapshot.
-        head = (
-            git(
-                "-c",
-                "user.name=Investment Intelligence",
-                "-c",
-                "user.email=actions@users.noreply.github.com",
-                "commit-tree",
-                tree,
-                "-m",
-                "Investment Intelligence SQLite checkpoint",
-            )
-            .decode()
-            .strip()
+        head = git_oid(
+            "-c",
+            "user.name=Investment Intelligence",
+            "-c",
+            "user.email=actions@users.noreply.github.com",
+            "commit-tree",
+            tree,
+            "-m",
+            "Investment Intelligence SQLite checkpoint",
         )
-        pending.write_text(f"{head} {digest}")
+        pending.write_text(head)
         git("push", "--quiet", f"--force-with-lease={REF}:{previous}", "origin", f"{head}:{REF}")
         head_file.write_text(head)
-        digest_file.write_text(digest)
         pending.unlink()
 
 

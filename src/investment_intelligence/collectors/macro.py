@@ -85,7 +85,6 @@ def _schedule(
     check_source,
     details,
     *,
-    published_at=None,
     status="scheduled",
     evidence_id=None,
     evidence_url=None,
@@ -102,7 +101,7 @@ def _schedule(
         title=title,
         summary=f"{title} · {stamp.astimezone(NY):%Y-%m-%d %H:%M %Z} ({label} time, {status}).",
         event_at=_iso(stamp),
-        published_at=published_at,
+        published_at=None,
         status=status,
         scheduled_at=_iso(stamp),
         importance=0.45,
@@ -423,12 +422,10 @@ def _bea_table(body, key, vintage):
         description = rows[0][0].lower()
         headers = [h.lower() for h in rows[1][1:]]
         if group == "pce" and "percent change from preceding month" in description:
-            expected = MONTHS.get(headers[-1]) if headers else None
-            if expected != int(period[-2:]):
+            previous = _previous(period)
+            if [MONTHS.get(month) for month in headers] != [int(previous[-2:]), int(period[-2:])]:
                 continue
-            periods = [(_previous(period), "previous"), (period, "actual")]
-            if not headers or len(headers) != 2 or MONTHS.get(headers[0]) != int(_previous(period)[-2:]):
-                continue
+            periods = [(previous, "previous"), (period, "actual")]
             unit = "percent change from preceding month"
         elif group == "gdp" and "percent change (saar)" in description:
             if not headers or (parts[3] + " estimate") != headers[-1]:
@@ -564,7 +561,7 @@ def _fed_calendar(ctx, source):
             )
         for group, title, release_at, document_path in releases:
             key = f"fed:{group}:{stamp:%Y-%m-%d}"
-            if (only_due and key not in due) or (not _window(ctx, release_at) and key not in due):
+            if key not in due and (only_due or not _window(ctx, release_at)):
                 continue
             details = {
                 "release_group": group,
@@ -878,14 +875,16 @@ def _fred_market(ctx, source):
     today = ctx.now.astimezone(NY).date()
     cursor = ctx.cursor.get("through")
     overlap = 10
+    config = ctx.config("macro")
+    revision_days = config.get("revision_lookback_days", 90)
     if ctx.backfill:
-        start = today - timedelta(days=ctx.config("macro").get("revision_lookback_days", 90))
+        start = today - timedelta(days=revision_days)
     else:
         start = (date.fromisoformat(cursor) if cursor else today) - timedelta(days=overlap)
     # Requests use a bounded date range and replay the overlap for revised market closes.
     end = min(today, start + timedelta(days=100))
     observations = {}
-    policy = ctx.config("macro").get("market_provider", "auto")
+    policy = config.get("market_provider", "auto")
     if policy not in {"auto", "publishers"}:
         raise ValueError("market_provider must be auto or publishers")
     use_fred = policy == "auto"
@@ -990,7 +989,7 @@ def _fred_market(ctx, source):
     if through:
         ctx.next_cursor["through"] = max(through, cursor or through)
     # Keep revision fingerprints across ordinary overlap and explicit 90-day backfills.
-    cutoff = str(end - timedelta(days=ctx.config("macro").get("revision_lookback_days", 90) + overlap))
+    cutoff = str(end - timedelta(days=revision_days + overlap))
     ctx.next_cursor["snapshots"] = {d: v for d, v in snapshots.items() if d >= cutoff}
 
 
