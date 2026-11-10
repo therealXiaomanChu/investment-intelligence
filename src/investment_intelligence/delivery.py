@@ -1,4 +1,4 @@
-"""Durable reports and conservative SMTP outbox with stable delivery identities."""
+"""Durable reports and delivery claims with stable notification identities."""
 
 from datetime import datetime
 from email.message import EmailMessage
@@ -10,7 +10,10 @@ import re
 import smtplib
 import ssl
 import tempfile
-from urllib.parse import quote
+import unicodedata
+from urllib.parse import quote, urlsplit
+
+import requests
 
 from .models import digest, utc
 from .storage import execute
@@ -23,6 +26,11 @@ def mail_environment(env):
     if scope not in {"all", "alerts"}:
         raise ValueError("EMAIL_SCOPE must be all or alerts")
     env["EMAIL_SCOPE"] = scope
+    transport = env.get("EMAIL_TRANSPORT") or "smtp"
+    if transport not in {"smtp", "github"}:
+        raise ValueError("EMAIL_TRANSPORT must be smtp or github")
+    if transport == "github":
+        return env
     address = (env.get("GMAIL_ADDRESS") or "").strip()
     if not env.get("SMTP_HOST") and address:
         env.update(
@@ -38,6 +46,8 @@ def mail_environment(env):
 
 
 def mail_selected(env, report_id):
+    if env.get("EMAIL_TRANSPORT") == "github":
+        return report_id.startswith("alert-")
     return env.get("EMAIL_SCOPE") != "alerts" or report_id.startswith("alert-")
 
 
@@ -141,7 +151,8 @@ def snapshot(db, settings, report_id, filename, events, title, now, note="", pro
     existing = db.all("SELECT report_id FROM reports WHERE report_id=:r", r=report_id)
     if not existing or provisional:
         body = render(db, events, title, now, settings, note)
-        enabled = settings.env.get("SMTP_HOST") and mail_selected(settings.env, report_id)
+        configured = settings.env.get("EMAIL_TRANSPORT") == "github" or settings.env.get("SMTP_HOST")
+        enabled = configured and mail_selected(settings.env, report_id)
         state = "ready" if enabled and not settings.demo and not provisional else "disabled"
         with db.write() as conn:
             execute(
@@ -200,7 +211,131 @@ def smtp(env, msg):
             raise RuntimeError("One or more recipients refused")
 
 
+def github_request(env, method, path, **kwargs):
+    headers = {
+        "Authorization": "Bearer " + env["NOTIFICATION_GITHUB_TOKEN"],
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        response = requests.request(
+            method,
+            "https://api.github.com" + path,
+            headers=headers,
+            timeout=(5, 20),
+            allow_redirects=False,
+            **kwargs,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"GitHub notification request failed ({type(exc).__name__})") from None
+    if response.status_code != (201 if method == "POST" else 200):
+        raise RuntimeError(f"GitHub notification request returned HTTP {response.status_code}")
+    return response.json()
+
+
+def github_notification(env, row):
+    """Verify repository identity and look up the stable report marker before any POST."""
+    repo = env.get("GITHUB_REPOSITORY") or ""
+    owner = env.get("GITHUB_REPOSITORY_OWNER") or ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", row["report_id"]):
+        raise ValueError("Invalid notification report ID")
+    if not (
+        env.get("GITHUB_ACTIONS") == "true"
+        and env.get("GITHUB_SERVER_URL") == "https://github.com"
+        and env.get("NOTIFICATION_GITHUB_TOKEN")
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", owner)
+        and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repo)
+        and repo.split("/")[0].lower() == owner.lower()
+    ):
+        raise ValueError(
+            "GitHub notifications require a GitHub Actions repository, owner and notification token"
+        )
+    path = "/repos/" + repo
+    info = github_request(env, "GET", path)
+    identity = info.get("owner", {})
+    if not (
+        info.get("private") is True
+        and info.get("has_issues") is True
+        and identity.get("type") == "User"
+        and identity.get("login", "").lower() == owner.lower()
+        and info.get("full_name", "").lower() == repo.lower()
+    ):
+        raise ValueError("GitHub notifications require a private personal repository with Issues enabled")
+
+    token = "II" + digest(row["report_id"])[:32].upper()
+    marker = f"<!-- investment-intelligence {token} -->"
+    results = github_request(
+        env,
+        "GET",
+        "/search/issues",
+        params={
+            "q": f'repo:{repo} is:issue in:title "{token}"',
+            "per_page": 100,
+        },
+    )
+    if results.get("incomplete_results") is not False or not isinstance(results.get("items"), list):
+        raise RuntimeError("GitHub returned an incomplete notification lookup")
+    for issue in results["items"]:
+        if (
+            issue.get("repository_url", "").lower() == ("https://api.github.com" + path).lower()
+            and issue.get("user", {}).get("login") == "github-actions[bot]"
+            and issue.get("title", "").endswith(f"[{token}]")
+            and marker in (issue.get("body") or "")
+        ):
+            return path, None
+
+    # A single verified account receives a mention. Keep publisher text in an indented code
+    # block so embedded Markdown, images, issue references and HTML cannot affect the issue.
+    source_links = []
+    for url in re.findall(r"\[Source\]\((https?://[^\s<>()\\]+)\)", row["body"]):
+        if len(url) > 1500:
+            continue
+        try:
+            parts = urlsplit(url)
+            if not parts.hostname or parts.username is not None or parts.password is not None:
+                continue
+        except ValueError:
+            continue
+        link = "<" + quote(url, safe=":/?&=%+.,_~-") + ">"
+        if link not in source_links:
+            source_links.append(link)
+        if len(source_links) == 6:
+            break
+    clean = html.unescape(row["body"][:14_000])
+    clean = "".join(c for c in clean if c == "\n" or not unicodedata.category(c).startswith("C"))
+    lines = clean.replace("@", "＠").splitlines()
+    heading = (
+        " ".join(re.sub(r"[#*\x60~_<>\\\[\]|!]", " ", lines[0]).split()) if lines else "Investment update"
+    )
+    text = "\n".join("    " + line for line in "\n".join(lines[1:]).strip().splitlines())[:8_000]
+    links = "\n\n" + "\n".join(source_links) if source_links else ""
+    payload = {
+        "title": f"{heading[:175]} [{token}]",
+        "body": f"@{owner}\n\n{text}{links}\n\n    Report {row['report_id']}\n\n{marker}",
+    }
+    return path, payload
+
+
+def post_github_notification(env, prepared):
+    path, issue = prepared
+    if issue is not None:
+        github_request(env, "POST", path + "/issues", json=issue)
+
+
 def send_test_email(env):
+    if env.get("EMAIL_TRANSPORT") == "github":
+        run_id = env.get("GITHUB_RUN_ID") or ""
+        if not run_id.isdecimal():
+            raise ValueError("GitHub notification test requires GITHUB_RUN_ID")
+        row = {
+            "report_id": "test-email-" + run_id,
+            "body": "# Investment Intelligence · notification test\n\nYour investment alert notification is connected.",
+        }
+        prepared = github_notification(env, row)
+        post_github_notification(env, prepared)
+        return (
+            "GitHub confirmed the test notification issue. Check the repository owner's notification inbox."
+        )
     if not env.get("SMTP_HOST"):
         raise ValueError("Configure GMAIL_ADDRESS and GMAIL_APP_PASSWORD, or an SMTP relay")
     stamp = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -241,15 +376,20 @@ def deliver(db, settings, report_id, send=smtp):
                 r=report_id,
             )
         return str(target), "disabled"
+    github = settings.env.get("EMAIL_TRANSPORT") == "github"
     try:
-        msg = mail_message(settings.env, row)
-    except (KeyError, TypeError, ValueError) as exc:
+        msg = github_notification(settings.env, row) if github else mail_message(settings.env, row)
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         # Nothing has been transmitted. Preserve a retryable outbox entry for repaired settings.
         with db.write() as conn:
             execute(
                 conn,
                 "UPDATE reports SET mail_error=:e WHERE report_id=:r AND mail_state='ready'",
-                e=f"SMTP configuration: {type(exc).__name__}",
+                e=(
+                    str(exc)
+                    if github and isinstance(exc, RuntimeError)
+                    else f"{'GitHub' if github else 'SMTP'} configuration: {type(exc).__name__}"
+                ),
                 r=report_id,
             )
         return str(target), "configuration_error"
@@ -266,7 +406,7 @@ def deliver(db, settings, report_id, send=smtp):
     try:
         before_external(db, settings.env)
     except BaseException:
-        # SMTP has not been called. An exit checkpoint must keep this report retryable.
+        # No notification has been sent. An exit checkpoint must keep this report retryable.
         with db.write() as conn:
             execute(
                 conn,
@@ -275,10 +415,13 @@ def deliver(db, settings, report_id, send=smtp):
             )
         raise
     try:
-        send(settings.env, msg)
+        if github:
+            post_github_notification(settings.env, msg)
+        else:
+            send(settings.env, msg)
         state, err = "sent", None
     except Exception as exc:
-        # SMTP may accept DATA and then drop the connection. Human inspection prevents duplicates.
+        # A provider can accept a send then drop the connection. Retain the ambiguous claim.
         state, err = "uncertain", type(exc).__name__
     with db.write() as conn:
         execute(

@@ -52,7 +52,7 @@ def test_actions_scope_and_dispatch_commands():
         assert "pull_request_target" not in workflow["on"]
     pipeline = yaml.safe_load((path / "pipeline.yml").read_text())
     assert pipeline["on"]["schedule"] == [{"cron": "*/15 * * * *", "timezone": "America/New_York"}]
-    assert pipeline["jobs"]["collect"]["permissions"] == {"contents": "write"}
+    assert pipeline["jobs"]["collect"]["permissions"] == {"contents": "write", "issues": "write"}
     guard = pipeline["jobs"]["collect"]["if"]
     assert "default_branch" in guard
     assert "github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'" in guard

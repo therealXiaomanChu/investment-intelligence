@@ -300,7 +300,8 @@ class Pipeline:
                 filename, state = deliver(db, settings, rid)
                 artifacts.append({"file": filename, "email": state})
                 if state in {"sending", "uncertain", "configuration_error"}:
-                    notes.append(f"{rid} SMTP outcome requires inspection")
+                    channel = "GitHub notification" if settings.env.get("EMAIL_TRANSPORT") == "github" else "SMTP"
+                    notes.append(f"{rid} {channel} outcome requires inspection")
         with db.write() as conn:
             execute(
                 conn,
@@ -384,7 +385,9 @@ def health_text(db, settings, now):
         ):
             detail = "SEC_USER_AGENT required for SEC requests"
         lines.append(f"| {s['id']} | {health} | {r['last_success'] or '—'} | {plain(detail)} |")
-    for key in ("OPENALEX_API_KEY", "BLS_API_KEY", "FRED_API_KEY", "LLM_API_KEY", "SMTP_HOST"):
+    github = settings.env.get("EMAIL_TRANSPORT") == "github"
+    mail_key = "NOTIFICATION_GITHUB_TOKEN" if github else "SMTP_HOST"
+    for key in ("OPENALEX_API_KEY", "BLS_API_KEY", "FRED_API_KEY", "LLM_API_KEY", mail_key):
         lines.append(f"\n{key} {'configured' if settings.env.get(key) else 'absent'}")
     delayed = db.all("SELECT event_key FROM events WHERE status='delayed' AND next_check IS NULL")
     if delayed:
@@ -393,5 +396,5 @@ def health_text(db, settings, now):
         "SELECT report_id,mail_state FROM reports WHERE mail_state IN ('uncertain','sending') OR (mail_state='ready' AND mail_error IS NOT NULL)"
     )
     for r in pending:
-        lines.append(f"\nSMTP inspection required for {r['report_id']} ({r['mail_state']})")
+        lines.append(f"\n{'GitHub notification' if github else 'SMTP'} inspection required for {r['report_id']} ({r['mail_state']})")
     return "\n".join(lines)

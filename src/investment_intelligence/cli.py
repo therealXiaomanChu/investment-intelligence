@@ -33,7 +33,7 @@ def parser():
     subs.add_parser("dispatch", help="Run due local slots and registered events once")
     subs.add_parser("serve", help="Dispatch every minute")
     subs.add_parser("doctor", help="Show persisted source and delivery health")
-    subs.add_parser("test-email", help="Send one test message using this deployment's mail settings")
+    subs.add_parser("test-email", help="Test the configured SMTP or private GitHub notification channel")
     q = subs.add_parser("search", help="Full-text search event titles and factual summaries")
     q.add_argument("query")
     q.add_argument("--limit", type=int, default=20)

@@ -20,6 +20,10 @@ cp -n .env.example .env
 
 ## 在 GitHub 上运行，电脑关机也能收信
 
+个人账号名下的私有仓库还可以用 **GitHub 通知邮件**。在 [GitHub 通知设置](https://github.com/settings/notifications) 确认收件邮箱，并为“参与和 @提及”开启邮件。在私有仓库启用 Issues，在仓库 Actions 的 **Variables** 填 `EMAIL_TRANSPORT=github`。这时可以跳过下文的 Gmail 应用密码步骤，直接运行 `test-email` 验收。每条重大提醒会作为私有 Issue 提及仓库所有者；有仓库访问权的人也能看到，订阅者可能收到通知。
+
+每 15 分钟调度相当于每天最多 96 个计划运行。私有仓库使用 GitHub 托管运行器会消耗账号的 Actions 额度。[GitHub 计费说明](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+
 1. 把仓库复制到自己的 GitHub 账号，保留默认分支上的 `.github/workflows/pipeline.yml`，并在 **Actions** 页启用工作流。个人使用可以选私有仓库。
 2. 打开 **Settings → Secrets and variables → Actions → Secrets**。用 Gmail 给自己发信时，创建两个 repository secrets，`GMAIL_ADDRESS` 填自己的 Gmail，`GMAIL_APP_PASSWORD` 填为此项目生成的应用专用密码。生成前需要在 Google 账号上开启两步验证。若你的组织限制应用专用密码，可使用下节的 SMTP 服务。[Google 设置说明](https://support.google.com/mail/answer/185833?hl=zh-Hans)
 3. 要采集美国上市公司的 SEC 申报，再添加 `SEC_USER_AGENT`，格式为真实的姓名或组织名、空格、可联系的邮箱。需要自定义关注列表时，把自己的 YAML 内容保存在 `WATCHLIST` secret 中。

@@ -29,6 +29,7 @@ jobs:
     if: github.ref_name == github.event.repository.default_branch && (github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true')
     permissions:
       contents: write
+      issues: write
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
@@ -61,6 +62,8 @@ jobs:
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TRANSPORT: ${{ vars.EMAIL_TRANSPORT || 'smtp' }}
+          NOTIFICATION_GITHUB_TOKEN: ${{ vars.EMAIL_TRANSPORT == 'github' && github.token || '' }}
           EMAIL_SCOPE: ${{ vars.EMAIL_SCOPE || 'alerts' }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
