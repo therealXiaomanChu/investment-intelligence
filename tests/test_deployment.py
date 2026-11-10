@@ -1,5 +1,6 @@
 """Package-level regression checks for private state and workflow boundaries."""
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -51,14 +52,59 @@ def test_actions_scope_and_dispatch_commands():
         assert workflow["permissions"] == {"contents": "read"}
         assert "pull_request_target" not in workflow["on"]
     pipeline = yaml.safe_load((path / "pipeline.yml").read_text())
-    assert pipeline["on"]["schedule"] == [{"cron": "7,22,37,52 * * * *"}]
+    [schedule] = pipeline["on"]["schedule"]
+    field, *other_fields = schedule["cron"].split()
+    assert other_fields == ["*"] * 4
+    minutes = list(range(0, 60, 15)) if field == "*/15" else sorted(map(int, field.split(",")))
+    assert 0 <= minutes[0] < 15 and minutes == list(range(minutes[0], 60, 15))
     assert pipeline["jobs"]["collect"]["permissions"] == {"contents": "write", "issues": "write"}
     guard = pipeline["jobs"]["collect"]["if"]
-    assert "default_branch" in guard
-    assert "github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'" in guard
+    assert guard == (
+        "(github.event_name == 'schedule' && vars.ENABLE_SCHEDULE == 'true') || "
+        "(github.event_name == 'workflow_dispatch' && github.ref == "
+        "format('refs/heads/{0}', github.event.repository.default_branch))"
+    )
     assert pipeline["concurrency"]["cancel-in-progress"] is False
     choices = pipeline["on"]["workflow_dispatch"]["inputs"]["job"]["options"]
     assert set(choices) == set(JOBS) | {"dispatch", "doctor", "test-email"}
+
+
+@pytest.mark.parametrize(
+    ("hint", "api", "expected"),
+    [
+        ("true", "offline", "true"),
+        ("false", "offline", "false"),
+        ("", "true", "true"),
+        ("", "false", "false"),
+        ("", "offline", None),
+        ("", "null", None),
+    ],
+)
+def test_actions_visibility_lookup(tmp_path, hint, api, expected):
+    pipeline = yaml.safe_load((ROOT / ".github/workflows/pipeline.yml").read_text())
+    step = next(
+        s for s in pipeline["jobs"]["collect"]["steps"] if s.get("name") == "Resolve repository visibility"
+    )
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n[ \"$*\" = 'api repos/owner/project --jq .private' ] && "
+        '[ "$API_REPLY" != offline ] && echo "$API_REPLY"\n'
+    )
+    gh.chmod(0o700)
+    target = tmp_path / "published.env"
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "EVENT_PRIVATE": hint,
+        "API_REPLY": api,
+        "GITHUB_REPOSITORY": "owner/project",
+        "GITHUB_ENV": str(target),
+    }
+    run = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, capture_output=True)
+    if expected is None:
+        assert run.returncode != 0 and not target.exists()
+    else:
+        assert run.returncode == 0 and target.read_text().strip() == f"REPOSITORY_PRIVATE={expected}"
 
 
 def test_compose_persists_and_mounts_readonly_configuration():

@@ -26,13 +26,29 @@ concurrency:
   cancel-in-progress: false
 jobs:
   collect:
-    if: github.ref_name == github.event.repository.default_branch && (github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true')
+    if: >-
+      (github.event_name == 'schedule' && vars.ENABLE_SCHEDULE == 'true') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     permissions:
       contents: write
       issues: write
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
+      - name: Resolve repository visibility
+        env:
+          EVENT_PRIVATE: ${{ github.event.repository.private }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private="$EVENT_PRIVATE"
+          if [[ -z "$private" ]]; then
+            private=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')
+          fi
+          if [[ "$private" != true && "$private" != false ]]; then
+            echo "Cannot verify repository visibility" >&2
+            exit 1
+          fi
+          echo "REPOSITORY_PRIVATE=$private" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
@@ -58,7 +74,6 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           INITIALIZE_STATE: ${{ inputs.initialize_state || false }}
           STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TRANSPORT: ${{ vars.EMAIL_TRANSPORT || 'smtp' }}
