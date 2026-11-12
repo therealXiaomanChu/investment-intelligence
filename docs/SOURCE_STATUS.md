@@ -1,12 +1,13 @@
 # Source and verification status
 
-On November 11, 2026, live checks parsed real records for all 18 entries in `config/sources.yaml`. The checks used current feeds, historical backfill for infrequent sources, and a previously announced financial release to exercise the event-triggered path. Source retention and publication schedules affect the number of records returned.
+On November 11, 2026, live checks parsed real records for the original 18 entries in `config/sources.yaml`. On November 12, the additional NVIDIA Newsroom source archived four press releases through the normal CLI. The checks used current feeds, historical backfill for infrequent sources, and a previously announced financial release to exercise the event-triggered path. Source retention and publication schedules affect the number of records returned.
 
 | Sources | Verified route and coverage |
 |---|---|
 | SEC filings and 13F | With an operator contact configured, the normal EDGAR path retrieved a 10-Q and parsed its company facts. The 13F adapter retrieved information tables and compared consecutive filings. |
 | Earnings calendar and results | The issuer's IR calendar supplied a future earnings event. Matching a past release to its same-day SEC filing verified the results path. Date-only appointments retain their published precision. |
 | OpenAI, NVIDIA, Google AI and Anthropic | The seven-day scan parsed announcements from each publisher's own feed or listing. |
+| NVIDIA Newsroom | The official [press release RSS](https://nvidianews.nvidia.com/releases.xml) contained the November 8 board statement and CEO letter and the November 10 announcement retaining investigative counsel. The newer counsel announcement generated a material report. The older releases were retained in the archive. |
 | Bitcoin Core, Ethereum Foundation and Agave | The Bitcoin Core feed yielded records in the 90-day backfill window. Ethereum and Agave returned official protocol notices and client releases. Client release tags alone do not establish network activation. |
 | arXiv and OpenAlex | The resumable arXiv OAI-PMH path completed a whole weekly window. OpenAlex enriched exact work matches; papers also remain available with their original arXiv evidence. [Research collection](RESEARCH_NEWS.md) |
 | BLS calendar and actuals | Direct BLS calendar requests returned HTTP 403 on the verification host. New York Fed dates and the U.S. advance release metadata distributed by the IMF supplied usable schedules. Dates without corroborated reference months stay provisional. The BLS API returned CPI, employment and PPI observations independently. [Macro collection](MACRO.md) |

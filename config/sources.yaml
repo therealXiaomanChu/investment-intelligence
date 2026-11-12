@@ -12,6 +12,7 @@ sources:
   - {id: arxiv, module: research, adapter: research, url: 'https://export.arxiv.org/api/query', jobs: [paper_weekly], access: arXiv metadata and optional OpenAlex enrichment, stale_hours: 192}
   - {id: openai_news, module: news, adapter: news, url: 'https://openai.com/news/rss.xml', jobs: [news_scan, premarket_brief], access: official RSS}
   - {id: nvidia_news, module: news, adapter: news, url: 'https://blogs.nvidia.com/feed/', jobs: [news_scan, premarket_brief], access: official RSS}
+  - {id: nvidia_newsroom, module: news, adapter: news, url: 'https://nvidianews.nvidia.com/releases.xml', jobs: [news_scan, premarket_brief], access: official press releases}
   - {id: google_ai, module: news, adapter: news, url: 'https://blog.google/technology/ai/rss/', jobs: [news_scan, premarket_brief], access: official RSS}
   - {id: bitcoin_core, module: news, adapter: news, url: 'https://bitcoincore.org/en/rss.xml', jobs: [crypto_scan], access: official project feed}
   - {id: ethereum_blog, module: news, adapter: news, url: 'https://blog.ethereum.org/feed.xml', jobs: [crypto_scan, calendar_sync, event_check], access: official project feed}

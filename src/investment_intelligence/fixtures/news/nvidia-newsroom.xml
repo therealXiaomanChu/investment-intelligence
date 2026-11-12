@@ -1,0 +1,9 @@
+<rss version="2.0"><channel><title>Synthetic NVIDIA Newsroom fixture</title>
+<item><title>Statement From NVIDIA Board of Directors</title>
+<link>https://nvidianews.nvidia.com/news/demo-board-statement</link>
+<pubDate>Sun, 01 Nov 2026 20:00:00 GMT</pubDate><modDate>Sun, 01 Nov 2026 20:30:00 GMT</modDate>
+<content><![CDATA[<p>The NVIDIA Board is initiating an independent investigation. This is synthetic demo text.</p>]]></content>
+<description>Synthetic board statement.</description></item>
+<item><title>Example product launch</title><link>https://blogs.nvidia.com/blog/demo-product/</link>
+<pubDate>Sun, 01 Nov 2026 21:00:00 GMT</pubDate><description>Synthetic blog syndication.</description></item>
+</channel></rss>

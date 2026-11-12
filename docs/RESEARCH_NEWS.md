@@ -30,6 +30,8 @@ Named Ethereum upgrades use the fork and network as their event identity. The co
 
 [OpenAI RSS](https://openai.com/news/rss.xml) · [NVIDIA RSS](https://blogs.nvidia.com/feed/) · [Google AI RSS](https://blog.google/technology/ai/rss/) · [Anthropic News](https://www.anthropic.com/news) · [Bitcoin Core RSS](https://bitcoincore.org/en/rss.xml) · [Ethereum Foundation RSS](https://blog.ethereum.org/feed.xml) · [Agave releases](https://github.com/anza-xyz/agave/releases)
 
+`news_scan --source nvidia_newsroom` collects official NVIDIA Newsroom press releases. The publisher also syndicates NVIDIA Blog posts into this feed. The collector leaves those posts to `nvidia_news`. It uses the RSS publication time and embedded issuer text to identify an announced independent board investigation, the appointment of investigative counsel, a CEO's explicit cooperation statement, and unambiguous senior executive appointments or departures. It archives other press releases as ordinary news. A feed with short retention can lose items between scans. NVIDIA describes its RSS feeds as an individual, non-commercial information service. [Newsroom RSS](https://nvidianews.nvidia.com/releases.xml) · [Publisher terms](https://www.nvidia.com/en-us/about-nvidia/rss/)
+
 ## Watchlist identity evidence
 
 The default nine author IDs were checked against authorships of the following works in November 2026. OpenAlex can merge new versions of its catalog. Audit these links when changing the watchlist. A printed name without an OpenAlex ID cannot trigger an identity bonus.

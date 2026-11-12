@@ -3,6 +3,7 @@ backfill_lookback_days: 90
 publishers:
   openai_news: {name: OpenAI, symbols: [OPENAI], format: rss}
   nvidia_news: {name: NVIDIA, symbols: [NVDA], format: rss}
+  nvidia_newsroom: {name: NVIDIA Newsroom, symbols: [NVDA], format: nvidia_newsroom}
   google_ai: {name: Google, symbols: [GOOG, GOOGL], format: rss}
   anthropic_news: {name: Anthropic, symbols: [ANTHROPIC], format: anthropic}
   bitcoin_core: {name: Bitcoin Core, symbols: [BTC], format: rss, network: BTC}

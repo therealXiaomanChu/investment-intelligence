@@ -17,11 +17,13 @@ from defusedxml.ElementTree import fromstring
 
 from ..http import SourceError
 from ..models import Fact, Record
+from . import nvidia_newsroom
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "news"
 NAMES = {
     "openai.com": "openai",
     "blogs.nvidia.com": "nvidia",
+    "nvidianews.nvidia.com": "nvidia-newsroom",
     "blog.google": "google",
     "www.anthropic.com": "anthropic",
     "bitcoincore.org": "bitcoin",
@@ -115,7 +117,7 @@ def _bitcoin_severity(content):
     return levels.pop() if len(levels) == 1 else None
 
 
-def _rss(raw, *, bitcoin_core=False):
+def _rss(raw, *, bitcoin_core=False, newsroom=False):
     root = fromstring(raw)
     channel = root.find("channel")
     if root.tag != "rss" or channel is None:
@@ -127,14 +129,16 @@ def _rss(raw, *, bitcoin_core=False):
         title, url, stamp = (node.findtext(k) for k in ("title", "link", "pubDate"))
         if not title or not url or not stamp:
             raise ValueError("Publisher RSS item missing title, link, or pubDate")
+        if newsroom and not nvidia_newsroom.is_release_url(url):
+            continue  # Newsroom also syndicates the separately monitored NVIDIA blog.
         published = _utc(stamp)
-        updated = node.findtext("{http://purl.org/dc/terms/}modified")
+        updated = node.findtext("modDate") if newsroom else node.findtext("{http://purl.org/dc/terms/}modified")
         description = node.findtext("description") or ""
         item = Item(
             node.findtext("guid") or url,
             _link(url),
             _plain(title),
-            _plain(description),
+            nvidia_newsroom.release_text(node) if newsroom else _plain(description),
             published,
             _utc(updated) if updated else published,
         )
@@ -321,6 +325,11 @@ def _record(ctx, source, policy, item, previous):
             # activation. Keep its identity and never infer a completed upgrade.
             kind, status, score = "protocol_upgrade", "unavailable", 0.85
             summary = f"{policy['name']} updated “{title}”. Activation status is unavailable."
+    elif policy["format"] == "nvidia_newsroom":
+        action = nvidia_newsroom.classify(title, item.description)
+        if action:
+            kind, score, summary = action
+            facts.append(Fact("issuer_governance_action", kind))
     elif re.search(r"\b(S-1|initial public offering|IPO)\b", title, re.I):
         kind, score = "ipo_announcement", 0.86
     elif re.search(
@@ -338,7 +347,7 @@ def _record(ctx, source, policy, item, previous):
         event_key=key or _initial_key(item, network),
         title=title,
         summary=summary,
-        event_at=at or item.updated,
+        event_at=item.published if policy["format"] == "nvidia_newsroom" else at or item.updated,
         published_at=item.published if item.precision == "instant" else None,
         status=status,
         assets=assets,
@@ -358,7 +367,8 @@ def collect(ctx, source):
     elif fmt == "anthropic":
         items = _anthropic(ctx.http.get(source["url"]), source["url"])
     else:
-        items = _rss(ctx.http.get(source["url"]), bitcoin_core=source["id"] == "bitcoin_core")
+        items = _rss(ctx.http.get(source["url"]), bitcoin_core=source["id"] == "bitcoin_core",
+                     newsroom=fmt == "nvidia_newsroom")
     previous = ctx.cursor.get("items", {})
     items = {i.external_id: i for i in items}
     # Restrict bootstrap history to keep an initial news scan timely. Backfill covers
