@@ -18,6 +18,24 @@ from .storage import EVIDENCE_URLS_SQL, execute, first, rows
 ORDER = " ORDER BY importance DESC,event_at DESC,event_key"
 
 
+def same_release_values(conn, event):
+    """A publication timestamp or supporting URL can arrive after an alert."""
+    previous = first(
+        conn,
+        "SELECT event_data FROM alert_queue WHERE event_key=:k ORDER BY event_version DESC LIMIT 1",
+        k=event["event_key"],
+    )
+    if not previous:
+        return False
+    prior_doc = json.loads(previous["event_data"])["current_document"]
+    if prior_doc == event["current_document"]:
+        return True
+    values = (
+        "SELECT metric,value,unit,period FROM facts WHERE document_id=:d ORDER BY metric,period,unit,value"
+    )
+    return rows(conn, values, d=prior_doc) == rows(conn, values, d=event["current_document"])
+
+
 class Pipeline:
     def __init__(self, db, settings, http=None):
         self.db, self.settings = db, settings
@@ -47,7 +65,7 @@ class Pipeline:
         )
         changes = set()
         observed_at = utc(now)
-        allow_alerts = not backfill and job not in {"source_health", "calendar_sync", "paper_weekly"}
+        allow_alerts = not backfill and job not in {"source_health", "paper_weekly"}
         cutoff = utc(now - timedelta(days=2))
         try:
             module = import_module(".collectors." + source["module"], __package__)
@@ -60,7 +78,14 @@ class Pipeline:
                     if not db.ingest(conn, record, observed_at):
                         continue
                     changes.add(record.event_key)
-                    if not allow_alerts:
+                    official_release = (
+                        ident in {"bls_actuals", "bea_releases"}
+                        and bool(record.facts)
+                        and bool(record.metadata.get("publication_evidence"))
+                        and record.published_at is not None
+                        and cutoff <= record.published_at <= observed_at
+                    )
+                    if not allow_alerts or (job == "calendar_sync" and not official_release):
                         continue
                     current = first(
                         conn,
@@ -70,6 +95,8 @@ class Pipeline:
                         cut=cutoff,
                     )
                     if current is None:
+                        continue
+                    if official_release and same_release_values(conn, current):
                         continue
                     current["fallback_signals"] = rows(
                         conn,

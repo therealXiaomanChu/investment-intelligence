@@ -91,6 +91,21 @@ H15 = b"""<table id="h15table">
 VIX = b"DATE,OPEN,HIGH,LOW,CLOSE\n10/30/2026,19.0,23.0,18.0,21.200000\n"
 
 
+def test_recent_bea_actual_is_discovered_even_with_another_calendar_target(ctx):
+    ctx.now = datetime(2026, 10, 29, 14, tzinfo=timezone.utc)
+    ctx.due = [{
+        "event_key": "bea:gdp:2026-Q3:advance", "scheduled_at": "2026-10-29T12:30:00+00:00",
+        "metadata": {"check_source": "bea_releases"},
+    }]
+    src = source("bea_releases", macro.BEA_RELEASES)
+    [release] = records(ctx, src)
+    assert release.event_key == "bea:pce:2026-09" and release.metadata["publication_evidence"] == release.url
+    assert release.event_at == release.published_at == "2026-10-29T12:30:00.000000+00:00"
+    ctx.http.overrides[release.url] = b"<p>Historical series return later</p>"
+    [unconfirmed] = records(ctx, src)
+    assert "publication_evidence" not in unconfirmed.metadata and not unconfirmed.facts
+
+
 def test_direct_publisher_fallback_keeps_spread_and_source_urls(ctx):
     def get(url, **kwargs):
         if url == macro.FRED:

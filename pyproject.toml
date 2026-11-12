@@ -9,7 +9,7 @@ description = "Source-linked corporate, macro, research and technology briefs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-dependencies = ["SQLAlchemy>=2.0,<3", "requests>=2.31,<3", "PyYAML>=6,<7", "beautifulsoup4>=4.12,<5", "exchange-calendars>=4.7,<5", "defusedxml>=0.7,<1", "python-dateutil>=2.8,<3", "python-dotenv>=0.21,<2"]
+dependencies = ["SQLAlchemy>=2.0,<3", "requests>=2.31,<3", "PyYAML>=6,<7", "beautifulsoup4>=4.12,<5", "exchange-calendars>=4.7,<5", "defusedxml>=0.7,<1", "python-dateutil>=2.8,<3", "python-dotenv>=0.21,<2", "pypdf>=6,<7"]
 
 [project.optional-dependencies]
 cloud = ["psycopg[binary]>=3.2,<4", "cryptography>=43"]

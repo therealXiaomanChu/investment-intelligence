@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 
 from ..http import SourceError
 from ..models import Fact, Record
+from .bls_publications import verified_release
 
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
@@ -453,7 +454,7 @@ def _bea_table(body, key, vintage):
 
 def _bea_published(ctx, source):
     due = {d["event_key"]: d for d in _due(ctx, source)}
-    discover = ctx.job == "calendar_sync" and not due
+    discover = ctx.job == "calendar_sync"
     if not due and not discover:
         return
     soup = BeautifulSoup(ctx.http.get(source["url"]), "html.parser")
@@ -469,19 +470,29 @@ def _bea_published(ctx, source):
         if not key or (not discover and key not in due):
             continue
         stamp = datetime.fromisoformat(timestamp["datetime"])
-        if stamp.tzinfo is None or stamp > ctx.now or (discover and ctx.now - stamp > timedelta(days=90)):
+        if stamp.tzinfo is None or stamp > ctx.now:
+            continue
+        # Daily discovery can find a second release missing from the calendar. A cold
+        # archive also reads the latest historical reports for its initial baseline.
+        if key not in due and ctx.now - stamp > timedelta(days=2 if due else 90):
             continue
         url = _link(source["url"], anchor["href"])
         facts = _bea_table(ctx.http.get(url), key, _iso(stamp))
         summary = f"BEA published {title}."
-        if facts:
-            metric = "Real GDP" if ":gdp:" in key else "PCE price index"
-            latest = [
-                f for f in facts if f.metric.split(" · ")[0] == metric and f.period == key.split(":")[2]
-            ]
-            if latest:
-                summary += f" {metric}: {latest[-1].value} {latest[-1].unit}."
+        parts = key.split(":")
+        metric = "Real GDP" if parts[1] == "gdp" else "PCE price index"
+        measure = metric + " · " + (parts[3] + " estimate" if parts[1] == "gdp" else "actual")
+        actual = next(
+            (f for f in facts if f.metric == measure and f.period == parts[2] and f.value is not None),
+            None,
+        )
+        meta = dict(due.get(key, {}).get("metadata") or {})
+        meta.update(release_group=parts[1], period=parts[2], check_source=source["id"])
+        if actual:
+            summary += f" {metric}: {actual.value} {actual.unit}."
+            meta["publication_evidence"] = url
         else:
+            meta.pop("publication_evidence", None)
             ctx.warn("BEA structured release measures unavailable for " + key)
         yield Record(
             source_id=source["id"],
@@ -497,9 +508,7 @@ def _bea_published(ctx, source):
             published_at=_iso(stamp),
             importance=0.9,
             scheduled_at=due.get(key, {}).get("scheduled_at"),
-            metadata=due.get(key, {}).get("metadata") or {
-                "release_group": key.split(":")[1], "period": key.split(":")[2], "check_source": source["id"],
-            },
+            metadata=meta,
             assets=_macro_assets(ctx),
         )
 
@@ -694,10 +703,11 @@ def _bls_actuals(ctx, source):
     observations = _observations(ctx.http.post_json(source["url"], query))
     if any(series not in observations for series in needed):
         raise ValueError("BLS response missing one or more requested series")
-    # Bootstrap when the calendar is inaccessible. The level is observable from BLS itself;
-    # its reference month is known and its actual publication timestamp is unknown.
+    # On an initial observation the time series gives the reference month. Only a verified
+    # report can supply an actual release clock; an existing calendar time stays a schedule.
     known = {d["event_key"] for d in targets}
     state = copy.deepcopy(ctx.cursor)
+    feeds, checked = {}, set()
     if discover:
         for group, specs in groups.items():
             months = set.intersection(*(set(observations[spec["id"]]) for spec in specs))
@@ -708,9 +718,11 @@ def _bls_actuals(ctx, source):
             observed = _bls_transition(ctx, state, group, last)
             if probe:
                 if observed is None:
-                    continue
+                    publication = verified_release(ctx, group, last, state, feeds, checked)
+                    if not publication or ctx.now - datetime.fromisoformat(publication["at"]) > timedelta(days=2):
+                        continue
                 key = f"bls:{group}:{last}"
-                if key not in known:
+                if observed and key not in known:
                     state.setdefault("observed_updates", {})[key] = observed
             floor = (ctx.now.date().replace(day=1) - timedelta(days=90)).strftime("%Y-%m")
             if last < floor:
@@ -769,6 +781,15 @@ def _bls_actuals(ctx, source):
         stamp = d.get("scheduled_at") or state.get("release_times", {}).get(key)
         if stamp:
             state.setdefault("release_times", {})[key] = stamp
+        if d.get("published_at") and d["metadata"].get("publication_evidence"):
+            state.setdefault("publications", {}).setdefault(
+                key, {"at": d["published_at"], "url": d["metadata"]["publication_evidence"]},
+            )
+        publication = verified_release(ctx, group, period, state, feeds, checked)
+        if publication:
+            event_at = publication["at"]
+            meta["publication_evidence"] = publication["url"]
+        elif stamp:
             event_at = stamp
         elif observed := state.get("observed_updates", {}).get(key):
             event_at = observed
@@ -783,14 +804,14 @@ def _bls_actuals(ctx, source):
         yield Record(
             source_id=source["id"],
             external_id=key,
-            url=urls[primary["id"]],
+            url=publication["url"] if publication else urls[primary["id"]],
             module="macro",
             kind="release",
             event_key=key,
             title=title,
             summary=summary,
             event_at=event_at,
-            published_at=None,
+            published_at=publication["at"] if publication else None,
             status="published",
             scheduled_at=stamp,
             assets=_macro_assets(ctx),
