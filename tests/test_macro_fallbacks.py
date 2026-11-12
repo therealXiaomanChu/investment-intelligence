@@ -183,18 +183,48 @@ def test_probe_never_promotes_an_old_baseline_to_a_fresh_alert(ctx):
     assert not records(ctx, src)
 
 
-def test_probe_preserves_first_observation_from_earlier_daily_check(ctx):
-    ctx.job = "bls_probe"
-    src = source("bls_actuals", macro.BLS_API)
-    assert not records(ctx, src)
-    ctx.now += timedelta(hours=20)
-    ctx.http.phase = 1
-    ctx.job = "calendar_sync"
-    records(ctx, src)
-    morning = ctx.now
-    ctx.now += timedelta(hours=1)
-    ctx.job = "bls_probe"
-    advanced = records(ctx, src)
-    cpi = next(r for r in advanced if r.event_key == "bls:cpi:2026-10")
-    assert datetime.fromisoformat(cpi.event_at) == morning
-    assert cpi.published_at is None
+@pytest.mark.parametrize("job", ["calendar_sync", "event_check"])
+def test_first_regular_observation_alerts_and_later_verified_clock_does_not_duplicate(tmp_path, monkeypatch, job):
+    pipeline = system(tmp_path)
+    src = next(s for s in pipeline.settings.sources if s["id"] == "bls_actuals")
+    now = datetime(2026, 11, 2, 23, 10, tzinfo=timezone.utc)
+    baseline = now - timedelta(hours=20)
+    due = [{"event_key": "bls:cpi:2026-10", "scheduled_at": baseline.isoformat(),
+            "metadata": {"period": "2026-10", "release_group": "cpi", "check_source": "bls_actuals"}}]
+
+    pipeline.collect(src, "calendar_sync", baseline, False, [])
+    assert not pipeline.db.all("SELECT * FROM alert_queue")
+    pipeline.http.phase = 1
+    pipeline.collect(src, job, now, False, due if job == "event_check" else [])
+    [alert] = pipeline.db.all("SELECT event_key,event_data FROM alert_queue")
+    assert alert["event_key"] == "bls:cpi:2026-10"
+    event = json.loads(alert["event_data"])
+    transition = json.loads(event["metadata"])["observed_transition"]
+    assert event["published_at"] is None and datetime.fromisoformat(event["event_at"]) == now
+    assert datetime.fromisoformat(transition["prior_checked_at"]) == baseline
+    assert (transition["prior_period"], transition["period"]) == ("2026-09", "2026-10")
+    assert transition["prior_observed_value"] == transition["previous_period_value"] == "302.000"
+    assert transition["current_period_value"] == "304.000"
+    pipeline.collect(src, "calendar_sync", now + timedelta(minutes=1), False, [])
+    assert len(pipeline.db.all("SELECT * FROM alert_queue")) == 1
+    proof = {"at": "2026-11-02T13:30:00+00:00", "url": "https://www.bls.gov/news.release/archives/cpi_11022026.htm"}
+    monkeypatch.setattr(macro, "verified_release", lambda ctx, group, period, *args:
+                        proof if group == "cpi" and period == "2026-10" else None)
+    pipeline.collect(src, "calendar_sync", now + timedelta(minutes=2), False, [])
+    [after] = pipeline.db.all("SELECT published_at FROM events WHERE event_key='bls:cpi:2026-10'")
+    assert datetime.fromisoformat(after["published_at"]) == datetime.fromisoformat(proof["at"])
+    assert len(pipeline.db.all("SELECT * FROM alert_queue")) == 1
+    pipeline.db.close()
+
+
+@pytest.mark.parametrize("prior,latest,hours,backfill", [
+    (None, "2026-10", 1, False), ("2026-09", "2026-10", 25, False),
+    ("2026-08", "2026-10", 1, False), ("2026-08", "2026-09", 1, False),
+    ("2026-09", "2026-10", 1, True),
+])
+def test_old_or_unobserved_baseline_never_confirms_a_calendar_transition(ctx, prior, latest, hours, backfill):
+    ctx.backfill = backfill
+    check = {"period": prior, "checked_at": (ctx.now-timedelta(hours=hours)).isoformat()}
+    state = {"latest_checks": {"cpi": check} if prior else {}}
+    values = {"2026-08": "300", "2026-09": "302", "2026-10": "304"}
+    assert macro._bls_transition(ctx, state, "cpi", latest, "CUSR0000SA0", values) is None

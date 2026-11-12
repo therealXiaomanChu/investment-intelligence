@@ -85,7 +85,14 @@ class Pipeline:
                         and record.published_at is not None
                         and cutoff <= record.published_at <= observed_at
                     )
-                    if not allow_alerts or (job == "calendar_sync" and not official_release):
+                    transition = record.metadata.get("observed_transition")
+                    observed_release = (
+                        ident == "bls_actuals" and record.published_at is None and bool(record.facts)
+                        and bool(transition) and utc(transition["first_observed_at"]) == record.event_at
+                        and cutoff <= record.event_at <= observed_at
+                    )
+                    macro_release = official_release or observed_release
+                    if not allow_alerts or (job == "calendar_sync" and not macro_release):
                         continue
                     current = first(
                         conn,
@@ -96,7 +103,7 @@ class Pipeline:
                     )
                     if current is None:
                         continue
-                    if official_release and same_release_values(conn, current):
+                    if macro_release and same_release_values(conn, current):
                         continue
                     current["fallback_signals"] = rows(
                         conn,

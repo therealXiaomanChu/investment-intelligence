@@ -664,27 +664,35 @@ def _level_facts(metrics, period, observations, state):
     return facts
 
 
-def _bls_transition(ctx, state, group, latest):
-    """A baseline confirms a period advanced. The API does not supply a release timestamp."""
+def _bls_transition(ctx, state, group, latest, series, values):
+    """Identify an observed period advance without assigning a publisher clock."""
     if ctx.backfill:
         return None
     checks = state.setdefault("latest_checks", {})
     prior = checks.get(group)
     if prior and latest < prior["period"]:
         return None
+    checks[group] = {"period": latest, "checked_at": _iso(ctx.now), "series": series, "value": values[latest]}
     expected = _previous(ctx.now.astimezone(NY).strftime("%Y-%m"))
-    advance = False
-    if prior and latest == expected and prior["period"] == _previous(latest):
-        age = ctx.now - datetime.fromisoformat(prior["checked_at"])
-        advance = timedelta(0) <= age <= timedelta(days=1)
-    # Daily collection can discover a new period before the alert window. Keep the
-    # prior baseline so the next scheduled probe can confirm and alert on the transition.
-    if not advance or ctx.job == "bls_probe":
-        checks[group] = {"period": latest, "checked_at": _iso(ctx.now)}
-    if not advance or ctx.job != "bls_probe":
+    previous = _previous(latest)
+    if not prior or latest != expected or prior["period"] != previous or previous not in values:
+        return None
+    if prior.get("series", series) != series:
+        return None
+    baseline = datetime.fromisoformat(prior["checked_at"])
+    if not timedelta(0) <= ctx.now - baseline <= timedelta(days=1):
         return None
     vintage = state.get("snapshots", {}).get(f"bls:{group}:{latest}", {}).get("vintage", _iso(ctx.now))
-    return vintage if datetime.fromisoformat(vintage) >= datetime.fromisoformat(prior["checked_at"]) else None
+    if not baseline <= datetime.fromisoformat(vintage) <= ctx.now:
+        return None
+    # Previous/current below are both supplied by the new official API response. The
+    # prior baseline value is separately identified because BLS can revise it.
+    return {
+        "first_observed_at": vintage, "prior_checked_at": prior["checked_at"],
+        "prior_period": previous, "period": latest, "series": series,
+        "prior_observed_value": prior.get("value"), "previous_period_value": values[previous],
+        "current_period_value": values[latest],
+    }
 
 
 def _bls_actuals(ctx, source):
@@ -708,41 +716,43 @@ def _bls_actuals(ctx, source):
     known = {d["event_key"] for d in targets}
     state = copy.deepcopy(ctx.cursor)
     feeds, checked = {}, set()
-    if discover:
-        for group, specs in groups.items():
-            months = set.intersection(*(set(observations[spec["id"]]) for spec in specs))
-            if not months:
-                ctx.warn(f"BLS {group} has no common reference period")
+    for group, specs in groups.items():
+        if group not in active_groups:
+            continue
+        months = set.intersection(*(set(observations[spec["id"]]) for spec in specs))
+        if not months:
+            ctx.warn(f"BLS {group} has no common reference period")
+            continue
+        last = max(months)
+        primary = specs[0]["id"]
+        transition = _bls_transition(ctx, state, group, last, primary, observations[primary])
+        if transition:
+            state.setdefault("observed_updates", {})[f"bls:{group}:{last}"] = transition
+        if not discover and not transition:
+            continue
+        if probe and not transition:
+            publication = verified_release(ctx, group, last, state, feeds, checked)
+            if not publication or ctx.now - datetime.fromisoformat(publication["at"]) > timedelta(days=2):
                 continue
-            last = max(months)
-            observed = _bls_transition(ctx, state, group, last)
-            if probe:
-                if observed is None:
-                    publication = verified_release(ctx, group, last, state, feeds, checked)
-                    if not publication or ctx.now - datetime.fromisoformat(publication["at"]) > timedelta(days=2):
-                        continue
-                key = f"bls:{group}:{last}"
-                if observed and key not in known:
-                    state.setdefault("observed_updates", {})[key] = observed
-            floor = (ctx.now.date().replace(day=1) - timedelta(days=90)).strftime("%Y-%m")
-            if last < floor:
-                ctx.warn(f"BLS {group} latest reference period is stale: {last}")
-            # Backfill all reference months in the configured observation overlap.
-            periods = sorted(m for m in months if m >= floor) if ctx.backfill else [last]
-            for period in periods:
-                key = f"bls:{group}:{period}"
-                if key not in known:
-                    targets.append(
-                        {
-                            "event_key": key,
-                            "scheduled_at": None,
-                            "metadata": {
-                                "check_source": source["id"],
-                                "period": period,
-                                "release_group": group,
-                            },
-                        }
-                    )
+        floor = (ctx.now.date().replace(day=1) - timedelta(days=90)).strftime("%Y-%m")
+        if last < floor:
+            ctx.warn(f"BLS {group} latest reference period is stale: {last}")
+        # Backfill all reference months in the configured observation overlap.
+        periods = sorted(m for m in months if m >= floor) if ctx.backfill else [last]
+        for period in periods:
+            key = f"bls:{group}:{period}"
+            if key not in known:
+                targets.append(
+                    {
+                        "event_key": key,
+                        "scheduled_at": None,
+                        "metadata": {
+                            "check_source": source["id"],
+                            "period": period,
+                            "release_group": group,
+                        },
+                    }
+                )
     targets.sort(key=lambda d: d["metadata"]["period"])
     state.setdefault("originals", {})
     state.setdefault("snapshots", {})
@@ -789,12 +799,17 @@ def _bls_actuals(ctx, source):
         if publication:
             event_at = publication["at"]
             meta["publication_evidence"] = publication["url"]
+        elif observed := state.get("observed_updates", {}).get(key):
+            # Older cursors recorded only the observation time.
+            if isinstance(observed, dict):
+                event_at = observed["first_observed_at"]
+                meta["observed_transition"] = observed
+            else:
+                event_at = observed
+            meta["time_precision"] = "first observed via BLS API; release time unavailable"
+            summary += f" First observed via the BLS API at {event_at}; release time unavailable."
         elif stamp:
             event_at = stamp
-        elif observed := state.get("observed_updates", {}).get(key):
-            event_at = observed
-            meta["time_precision"] = "first observed via BLS API; release time unavailable"
-            summary += f" First observed via the BLS API at {observed}; release time unavailable."
         else:
             # The dated event is the end of the underlying survey month, explicitly labeled.
             start = date.fromisoformat(period + "-01")
