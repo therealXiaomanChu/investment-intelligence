@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from defusedxml.ElementTree import fromstring
 
+from ..http import SourceError
 from ..models import Fact, Record
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "news"
@@ -45,6 +46,11 @@ class Item:
     updated: str
     precision: str = "instant"
     prerelease: bool = False
+
+
+@dataclass
+class BitcoinAdvisory(Item):
+    publisher_severity: str | None = None
 
 
 def _link(value):
@@ -79,7 +85,37 @@ def _utc(value):
     return stamp.astimezone(timezone.utc).isoformat()
 
 
-def _rss(raw):
+def _bitcoin_advisory(item):
+    link = urlparse(item.url)
+    return (
+        link.scheme == "https"
+        and link.netloc == "bitcoincore.org"
+        and re.fullmatch(r"/en/\d{4}/\d{2}/\d{2}/[a-zA-Z0-9_-]+/?", link.path)
+        and ("/disclose-" in link.path or re.match(r"^CVE-\d{4}-\d+\b", item.title, re.I))
+    )
+
+
+def _bitcoin_severity(content):
+    # The publisher states its rating in a standalone paragraph. A quoted advisory
+    # or a mention of a high-severity impact in the surrounding prose is not a rating.
+    levels = set()
+    paragraphs = content.find_all("p") if content.find() is not None else [content]
+    for paragraph in paragraphs:
+        if paragraph.find_parent(["blockquote", "aside", "li", "pre"]):
+            continue
+        sentence = " ".join(paragraph.get_text(" ", strip=True).split())
+        rating = re.fullmatch(
+            r"This (?:issue|vulnerability) is considered (Low|Medium|High|Critical) severity"
+            r"(?: and easily discoverable)?\s*\.",
+            sentence,
+            re.I,
+        )
+        if rating:
+            levels.add(rating[1].lower())
+    return levels.pop() if len(levels) == 1 else None
+
+
+def _rss(raw, *, bitcoin_core=False):
     root = fromstring(raw)
     channel = root.find("channel")
     if root.tag != "rss" or channel is None:
@@ -93,14 +129,19 @@ def _rss(raw):
             raise ValueError("Publisher RSS item missing title, link, or pubDate")
         published = _utc(stamp)
         updated = node.findtext("{http://purl.org/dc/terms/}modified")
-        yield Item(
+        description = node.findtext("description") or ""
+        item = Item(
             node.findtext("guid") or url,
             _link(url),
             _plain(title),
-            _plain(node.findtext("description") or ""),
+            _plain(description),
             published,
             _utc(updated) if updated else published,
         )
+        if bitcoin_core and _bitcoin_advisory(item):
+            rating = _bitcoin_severity(BeautifulSoup(description, "html.parser"))
+            item = BitcoinAdvisory(**asdict(item), publisher_severity=rating)
+        yield item
 
 
 def _agave(raw):
@@ -257,6 +298,13 @@ def _record(ctx, source, policy, item, previous):
             channel = "pre-release" if item.prerelease else "release"
             facts.append(Fact("release_channel", channel))
             summary = f"Anza published {title} as a client {channel}."
+        if isinstance(item, BitcoinAdvisory):
+            severity = item.publisher_severity
+            if severity:
+                facts.append(Fact("publisher_severity", severity))
+                summary = f"Bitcoin Core rates this security advisory {severity}."
+                if severity in {"high", "critical"}:
+                    score = 0.9
         change = _upgrade(item) if network == "ETH" else None
         if change:
             fork, target, status, at, day = change
@@ -310,7 +358,7 @@ def collect(ctx, source):
     elif fmt == "anthropic":
         items = _anthropic(ctx.http.get(source["url"]), source["url"])
     else:
-        items = _rss(ctx.http.get(source["url"]))
+        items = _rss(ctx.http.get(source["url"]), bitcoin_core=source["id"] == "bitcoin_core")
     previous = ctx.cursor.get("items", {})
     items = {i.external_id: i for i in items}
     # Restrict bootstrap history to keep an initial news scan timely. Backfill covers
@@ -326,8 +374,26 @@ def collect(ctx, source):
         if not old and datetime.fromisoformat(item.updated) < earliest:
             continue
         stamp = hashlib.sha256(json.dumps(asdict(item), sort_keys=True).encode()).hexdigest()
+        if isinstance(item, BitcoinAdvisory):
+            stamp = "btc-severity-v1:" + stamp
         if stamp == old.get("stamp"):
             continue
+        if isinstance(item, BitcoinAdvisory) and not item.publisher_severity:
+            # A short RSS description may omit the rating. Verify only this official
+            # advisory page, after applying the lookback, cache and quota checks.
+            try:
+                page = BeautifulSoup(ctx.http.get(item.url), "html.parser")
+                article = page.select_one("article.h-entry .e-content")
+                heading = page.select_one("article.h-entry h1")
+                if article is None or heading is None or _plain(heading.get_text()) != item.title:
+                    raise ValueError("Official advisory page could not be verified")
+                item.publisher_severity = _bitcoin_severity(article)
+                if not item.publisher_severity:
+                    raise ValueError("No unambiguous publisher rating yet")
+            except (SourceError, ValueError):
+                ctx.warn(f"Bitcoin Core advisory rating unavailable: {item.url}")
+                state[item.external_id] = {**old, "retry_severity": True}
+                continue
         record = _record(ctx, source, policy, item, old)
         if record is not None:
             yield record
